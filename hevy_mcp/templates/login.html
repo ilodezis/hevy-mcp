@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hevy MCP — вход</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+      background: #0b0d10; color: #e7e9ee;
+      font: 15px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; }
+    .card { width: min(92vw, 360px); background: #14171c; border: 1px solid #232830;
+      border-radius: 16px; padding: 28px; box-shadow: 0 10px 40px rgba(0,0,0,.4); }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    p.sub { margin: 0 0 20px; color: #9aa3b2; font-size: 13px; }
+    label { display: block; font-size: 13px; color: #9aa3b2; margin-bottom: 6px; }
+    input { width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid #2a303a;
+      background: #0f1216; color: #e7e9ee; font-size: 15px; }
+    input:focus { outline: none; border-color: #4f7cff; }
+    button { width: 100%; margin-top: 16px; padding: 11px; border: 0; border-radius: 10px;
+      background: #4f7cff; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }
+    button:hover { background: #3f6ae6; }
+    .err { margin: 0 0 14px; padding: 9px 11px; border-radius: 9px;
+      background: #2a1416; border: 1px solid #5a2027; color: #ff9ba3; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <form class="card" method="post" action="/login">
+    <h1>Hevy MCP</h1>
+    <p class="sub">Коннектор Claude ↔ Hevy</p>
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+    <input type="hidden" name="next" value="{{ next }}" />
+    <label for="password">Пароль</label>
+    <input id="password" name="password" type="password" autofocus autocomplete="current-password" />
+    <button type="submit">Войти</button>
+  </form>
+</body>
+</html>

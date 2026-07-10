@@ -1,0 +1,15 @@
+services:
+  hevy_mcp:
+    build: .
+    container_name: hevy_mcp
+    environment:
+      TZ: Europe/Chisinau
+    # Bind-mount .env so every process start reads it fresh (no env_file
+    # snapshot that would shadow live edits).
+    volumes:
+      - ./.env:/app/.env
+    ports:
+      # Loopback only — the host nginx terminates TLS on the subdomain and
+      # reverse-proxies to this port. Never expose it directly to the internet.
+      - "127.0.0.1:8010:8010"
+    restart: unless-stopped
