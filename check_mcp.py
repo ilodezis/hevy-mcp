@@ -47,7 +47,42 @@ def _sse_payload(body: str) -> dict:
     return json.loads(body)
 
 
+async def check_history_params() -> None:
+    """The one branch in the client: omit date params that were not given."""
+    from hevy_mcp.client import HevyClient
+
+    seen: list[tuple] = []
+
+    async def spy(self, method, path, *, params=None, json=None):
+        seen.append((method, path, params))
+        return {}
+
+    original, HevyClient._request = HevyClient._request, spy
+    try:
+        client = HevyClient()
+        await client.get_exercise_history("abc123")
+        await client.get_exercise_history("abc123", start_date="2026-01-01T00:00:00Z")
+        await client.get_exercise_history(
+            "abc123", start_date="2026-01-01T00:00:00Z", end_date="2026-06-01T00:00:00Z"
+        )
+        await client.get_user_info()
+        await client.get_routine_folder(42)
+    finally:
+        HevyClient._request = original
+
+    assert seen[0] == ("GET", "/v1/exercise_history/abc123", None), seen[0]
+    assert seen[1][2] == {"start_date": "2026-01-01T00:00:00Z"}, seen[1]
+    assert seen[2][2] == {
+        "start_date": "2026-01-01T00:00:00Z",
+        "end_date": "2026-06-01T00:00:00Z",
+    }, seen[2]
+    assert seen[3][1] == "/v1/user/info", seen[3]
+    assert seen[4][1] == "/v1/routine_folders/42", seen[4]
+    print("[ok] history params -> dates passed through, empty window omitted")
+
+
 async def main() -> int:
+    await check_history_params()
     token = get_mcp_serializer().dumps(
         {"type": "mcp_access_token", "client_id": load_config().mcp_client_id}
     )
@@ -87,8 +122,9 @@ async def main() -> int:
                 headers=auth,
             )
             tools = sorted(t["name"] for t in _sse_payload(r.text)["result"]["tools"])
-            assert len(tools) == 14, f"expected 14 tools, got {len(tools)}: {tools}"
-            assert "create_routine" in tools and "workout_count" in tools, tools
+            assert len(tools) == 17, f"expected 17 tools, got {len(tools)}: {tools}"
+            for expected in ("create_routine", "workout_count", "get_exercise_history"):
+                assert expected in tools, f"{expected} missing from {tools}"
             print(f"[ok] tools/list -> {len(tools)} tools: {', '.join(tools)}")
 
     print("\nALL CHECKS PASSED")

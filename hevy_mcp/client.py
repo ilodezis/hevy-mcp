@@ -1,4 +1,4 @@
-"""Async Hevy REST client — full read/write over the ``/v1`` API.
+"""Async Hevy REST client over the ``/v1`` API.
 
 Authenticated with the personal ``api-key`` header. Constructed lazily so the app
 boots before Hevy is configured; only an actual request needs the key.
@@ -123,6 +123,9 @@ class HevyClient:
             "GET", "/v1/routine_folders", params={"page": page, "pageSize": page_size}
         )
 
+    async def get_routine_folder(self, folder_id: int | str) -> dict:
+        return await self._request("GET", f"/v1/routine_folders/{folder_id}")
+
     async def create_routine_folder(self, title: str) -> dict:
         return await self._request(
             "POST", "/v1/routine_folders", json={"routine_folder": {"title": title}}
@@ -144,3 +147,25 @@ class HevyClient:
         return await self._request(
             "POST", "/v1/exercise_templates", json={"exercise": exercise}
         )
+
+    # ── Exercise history ──────────────────────────────────────────────────────
+    async def get_exercise_history(
+        self,
+        template_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> dict:
+        """Every set ever performed for one exercise, flat. Unpaginated — the
+        date window is the only way to bound the response size."""
+        params = {
+            k: v
+            for k, v in (("start_date", start_date), ("end_date", end_date))
+            if v
+        }
+        return await self._request(
+            "GET", f"/v1/exercise_history/{template_id}", params=params or None
+        )
+
+    # ── Account ───────────────────────────────────────────────────────────────
+    async def get_user_info(self) -> dict:
+        return await self._request("GET", "/v1/user/info")

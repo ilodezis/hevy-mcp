@@ -42,8 +42,11 @@ Without needing a local database, Claude can seamlessly:
 * `list_routines` — Retrieve custom workout routines.
 * `get_routine(id)` — Retrieve details for a specific routine.
 * `list_routine_folders` — Fetch routine folders.
+* `get_routine_folder(id)` — Get a single routine folder by id.
 * `search_exercise_templates(query)` — Search for exercises (e.g., "bench press").
 * `get_exercise_template(id)` — Get template details for a specific exercise.
+* `get_exercise_history(id, start_date, end_date)` — Every set ever performed for one exercise. The tool for progression, PRs and plateaus — one call instead of paging `list_workouts` ten at a time.
+* `get_user_info` — Which Hevy account the connector is wired to.
 
 #### ✍️ Write Operations
 * `create_routine(name, notes, warmups, workoutExercises)` — Save a new routine.
@@ -164,8 +167,11 @@ server {
 * `list_routines` — Получить список шаблонов тренировок.
 * `get_routine(id)` — Детальная информация о шаблоне тренировки.
 * `list_routine_folders` — Список папок с шаблонами.
+* `get_routine_folder(id)` — Детальная информация о конкретной папке.
 * `search_exercise_templates(query)` — Поиск упражнений (например, "bench press").
 * `get_exercise_template(id)` — Детали конкретного упражнения.
+* `get_exercise_history(id, start_date, end_date)` — Все подходы по одному упражнению за всё время. Инструмент для прогрессии, рекордов и застоев — один вызов вместо перелистывания `list_workouts` по десять штук.
+* `get_user_info` — К какому аккаунту Hevy подключён коннектор.
 
 #### ✍️ Запись данных
 * `create_routine(name, notes, warmups, workoutExercises)` — Сохранить новый шаблон тренировки.

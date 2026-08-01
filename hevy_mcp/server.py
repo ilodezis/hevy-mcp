@@ -9,6 +9,10 @@ Building a routine is a two-step dance the model should follow:
   1. ``search_exercise_templates("bench press")`` → get the ``exercise_template_id``.
   2. ``create_routine(...)`` with those ids and the set scheme.
 Exercise template ids are stable, so once discovered they can be reused.
+
+Analysing progress follows the same two steps: ``search_exercise_templates`` for
+the id, then ``get_exercise_history`` — not ``list_workouts``, which pages ten
+workouts at a time.
 """
 from __future__ import annotations
 
@@ -165,6 +169,24 @@ async def list_routine_folders(page: int = 1, page_size: int = 10) -> dict:
 
 
 @mcp.tool()
+async def get_routine_folder(folder_id: int) -> dict:
+    """Fetch a single routine folder by id (title, position, timestamps)."""
+    try:
+        return await _client().get_routine_folder(folder_id)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
+async def get_user_info() -> dict:
+    """Whose Hevy account this connector is wired to: {id, name, url}."""
+    try:
+        return await _client().get_user_info()
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
 async def search_exercise_templates(query: str, limit: int = 20) -> list[dict]:
     """Find exercise templates by title substring (case-insensitive).
 
@@ -204,6 +226,35 @@ async def get_exercise_template(template_id: str) -> dict:
     """Fetch a single exercise template by id."""
     try:
         return await _client().get_exercise_template(template_id)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
+async def get_exercise_history(
+    exercise_template_id: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> dict:
+    """Every set performed for ONE exercise across all workouts — the right tool
+    for progression, personal records and plateaus.
+
+    Prefer this over paging ``list_workouts``: that caps at 10 workouts per call,
+    so answering "how has my bench moved this year" through it costs dozens of
+    requests. Here it is one.
+
+    ``exercise_template_id`` comes from ``search_exercise_templates``.
+    ``start_date`` / ``end_date`` are optional ISO-8601 timestamps (e.g.
+    '2026-01-01T00:00:00Z'); pass at least ``start_date`` for a long-running
+    exercise, since the response is unpaginated and returns one entry per set.
+    Each entry carries the workout it came from (id, title, start/end time) plus
+    the set itself (weight_kg, reps, distance_meters, duration_seconds, rpe,
+    set_type), so sets can be grouped into sessions by ``workout_id``.
+    """
+    try:
+        return await _client().get_exercise_history(
+            exercise_template_id, start_date=start_date, end_date=end_date
+        )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
