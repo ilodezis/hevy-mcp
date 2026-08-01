@@ -134,7 +134,7 @@ server {
 
 #### 4. Link with Claude
 1. Navigate to Claude.ai → **Settings** → **Connectors** → **Add custom connector**.
-2. Put your connector URL: `https://your-subdomain.domain.com/mcp/sse`
+2. Put your connector URL: `https://your-subdomain.domain.com/mcp/`
 3. Enter your `HEVY_MCP_PASSWORD` on the consent page and click authorize.
 
 ---
@@ -256,5 +256,5 @@ server {
 
 #### 4. Подключение к Claude
 1. В Claude.ai перейдите в **Settings** → **Connectors** → **Add custom connector**.
-2. Введите ваш адрес: `https://your-subdomain.domain.com/mcp/sse`
+2. Введите ваш адрес: `https://your-subdomain.domain.com/mcp/`
 3. На странице согласия введите `HEVY_MCP_PASSWORD` и подтвердите интеграцию.

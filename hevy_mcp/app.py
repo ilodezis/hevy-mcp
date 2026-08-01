@@ -4,6 +4,7 @@ behind a Bearer-token ASGI middleware.
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -86,7 +87,24 @@ class MCPAuthMiddleware:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Hevy MCP Connector", docs_url=None, redoc_url=None)
+    cfg = load_config()
+
+    # Streamable HTTP — the SSE transport is deprecated in the MCP spec since
+    # 2025-03. path="/" so that mounting on /mcp lands the endpoint on /mcp/
+    # rather than /mcp/mcp (the library's own default path would be appended).
+    mcp_app = mcp.http_app(transport="http", path="/")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Streamable HTTP builds its session manager inside the mounted app's
+        # lifespan, and app.mount() never runs a sub-app's lifespan — without
+        # this every /mcp/ request fails with "manager not initialized".
+        async with mcp_app.router.lifespan_context(_app):
+            yield
+
+    app = FastAPI(
+        title="Hevy MCP Connector", docs_url=None, redoc_url=None, lifespan=lifespan,
+    )
 
     app.include_router(auth_router)
     app.include_router(oauth_router)
@@ -100,9 +118,8 @@ def create_app() -> FastAPI:
             "hevy_configured": HevyClient.from_config().is_configured,
         })
 
-    cfg = load_config()
     app.mount("/mcp", MCPAuthMiddleware(
-        mcp.sse_app(), client_id=cfg.mcp_client_id, max_age=cfg.token_ttl,
+        mcp_app, client_id=cfg.mcp_client_id, max_age=cfg.token_ttl,
     ))
 
     return app

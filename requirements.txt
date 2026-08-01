@@ -9,4 +9,4 @@ python-dotenv>=1.0,<2.0
 
 # ── Model Context Protocol (MCP) ─────────────────────────────────────────────
 # Pinned to the version proven against Claude.ai.
-fastmcp==2.2.0
+fastmcp==3.4.5

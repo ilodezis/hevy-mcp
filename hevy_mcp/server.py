@@ -22,7 +22,6 @@ from hevy_mcp.client import HevyAPIError, HevyClient, HevyNotConfigured
 
 logger = logging.getLogger(__name__)
 
-# Stateless mode for cloud/OAuth deployment compatibility.
 mcp = FastMCP("Hevy")
 
 SetType = Literal["warmup", "normal", "failure", "dropset"]
