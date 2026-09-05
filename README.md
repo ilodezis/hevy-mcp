@@ -99,6 +99,16 @@ python run_local.py
 The server will boot on `http://127.0.0.1:8010`. Health check endpoint is available at `GET /`.
 *(Set `HEVY_MCP_COOKIE_SECURE=false` for local HTTP testing).*
 
+#### 5. Run checks
+```bash
+python check_mcp.py
+python -m unittest -v test_mcp
+```
+The integration suite checks all 17 tools over both legacy and modern MCP,
+OAuth login and token exchange, input validation, and Hevy error handling.
+It uses test credentials and simulated Hevy responses; no account data changes.
+FastMCP is pinned to 4.0.3; FastAPI 0.133+ is required for Starlette 1.x compatibility.
+
 ---
 
 ### 🐳 Production Deployment
@@ -223,6 +233,16 @@ python run_local.py
 ```
 Сервис начнет слушать адрес `http://127.0.0.1:8010`. Health check доступен по пути `GET /`.
 *(Для локального запуска без SSL установите `HEVY_MCP_COOKIE_SECURE=false`).*
+
+#### 5. Проверки
+```bash
+python check_mcp.py
+python -m unittest -v test_mcp
+```
+Тесты проверяют все 17 инструментов через старый и новый протокол MCP,
+вход и получение токена OAuth, проверку входных данных и обработку ошибок Hevy.
+Используются тестовые ключи и имитация ответов Hevy — данные аккаунта не меняются.
+Версия FastMCP закреплена на 4.0.3; для совместимости со Starlette 1.x нужен FastAPI 0.133+.
 
 ---
 
