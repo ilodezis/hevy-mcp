@@ -101,7 +101,6 @@ The server will boot on `http://127.0.0.1:8010`. Health check endpoint is availa
 
 #### 5. Run checks
 ```bash
-python check_mcp.py
 python -m unittest -v test_mcp
 ```
 The integration suite checks all 17 tools over both legacy and modern MCP,
@@ -236,7 +235,6 @@ python run_local.py
 
 #### 5. Проверки
 ```bash
-python check_mcp.py
 python -m unittest -v test_mcp
 ```
 Тесты проверяют все 17 инструментов через старый и новый протокол MCP,

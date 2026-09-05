@@ -53,7 +53,11 @@ CASES = [
     ("get_user_info", {}, "GET", "/v1/user/info"),
     ("search_exercise_templates", {"query": "bench"}, "GET", "/v1/exercise_templates"),
     ("get_exercise_template", {"template_id": "bench"}, "GET", "/v1/exercise_templates/bench"),
+    # Three entries: the date window is optional, and params it was not given
+    # must be omitted from the query string entirely.
+    ("get_exercise_history", {"exercise_template_id": "bench"}, "GET", "/v1/exercise_history/bench"),
     ("get_exercise_history", {"exercise_template_id": "bench", "start_date": "2026-01-01T00:00:00Z"}, "GET", "/v1/exercise_history/bench"),
+    ("get_exercise_history", {"exercise_template_id": "bench", "start_date": "2026-01-01T00:00:00Z", "end_date": "2026-06-01T00:00:00Z"}, "GET", "/v1/exercise_history/bench"),
     ("create_routine", {"title": "Test routine", "exercises": EXERCISES}, "POST", "/v1/routines"),
     ("update_routine", {"routine_id": "r1", "title": "Test routine", "exercises": EXERCISES}, "PUT", "/v1/routines/r1"),
     ("create_routine_folder", {"title": "Test folder"}, "POST", "/v1/routine_folders"),
@@ -159,7 +163,7 @@ class MCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sets", schema["properties"]["exercises"]["items"]["required"])
         original_client = httpx.AsyncClient
         for name, args, method, path in CASES:
-            with self.subTest(tool=name, modern=modern):
+            with self.subTest(tool=name, args=args, modern=modern):
                 requests = []
                 upstream = {"ok": name}
                 if name == "workout_count":
@@ -190,7 +194,8 @@ class MCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 if name == "list_workouts":
                     self.assertEqual(request.url.params["pageSize"], "10")
                 if name == "get_exercise_history":
-                    self.assertEqual(dict(request.url.params), {"start_date": args["start_date"]})
+                    dates = {k: v for k, v in args.items() if k.endswith("_date")}
+                    self.assertEqual(dict(request.url.params), dates)
                 if "exercises" in args:
                     kind = "routine" if "routine" in name else "workout"
                     sent = json.loads(request.content)[kind]
