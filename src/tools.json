@@ -1,0 +1,1164 @@
+[
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Total number of logged workouts on the Hevy account.",
+  "inputSchema": {
+   "properties": {},
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "workout_count",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Workout Count"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "List logged workouts, newest first (paginated; page_size max 10).\nReturns the Hevy envelope: {page, page_count, workouts: [...]}.",
+  "inputSchema": {
+   "properties": {
+    "page": {
+     "default": 1,
+     "type": "integer"
+    },
+    "page_size": {
+     "default": 10,
+     "type": "integer"
+    }
+   },
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "list_workouts",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "List Workouts"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Fetch a single workout by id (full exercise → set tree).",
+  "inputSchema": {
+   "properties": {
+    "workout_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "workout_id"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "get_workout",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Get Workout"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "List saved routines / training plans (paginated; page_size max 10).",
+  "inputSchema": {
+   "properties": {
+    "page": {
+     "default": 1,
+     "type": "integer"
+    },
+    "page_size": {
+     "default": 10,
+     "type": "integer"
+    }
+   },
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "list_routines",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "List Routines"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Fetch a single routine by id (its full exercise → set structure).",
+  "inputSchema": {
+   "properties": {
+    "routine_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "routine_id"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "get_routine",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Get Routine"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "List routine folders (e.g. Push / Pull / Legs splits).",
+  "inputSchema": {
+   "properties": {
+    "page": {
+     "default": 1,
+     "type": "integer"
+    },
+    "page_size": {
+     "default": 10,
+     "type": "integer"
+    }
+   },
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "list_routine_folders",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "List Routine Folders"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Fetch a single routine folder by id (title, position, timestamps).",
+  "inputSchema": {
+   "properties": {
+    "folder_id": {
+     "type": "integer"
+    }
+   },
+   "required": [
+    "folder_id"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "get_routine_folder",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Get Routine Folder"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Whose Hevy account this connector is wired to: {id, name, url}.",
+  "inputSchema": {
+   "properties": {},
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "get_user_info",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Get User Info"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Find exercise templates by title substring (case-insensitive).\n\nReturns a list of {id, title, type, primary_muscle_group, equipment, is_custom}.\nUse the ``id`` as ``exercise_template_id`` when building routines/workouts.\nScans up to ~1000 templates (default library + your custom ones).",
+  "inputSchema": {
+   "properties": {
+    "query": {
+     "type": "string"
+    },
+    "limit": {
+     "default": 20,
+     "type": "integer"
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "search_exercise_templates",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "items": {
+      "additionalProperties": true,
+      "type": "object"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Search Exercise Templates"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Fetch a single exercise template by id.",
+  "inputSchema": {
+   "properties": {
+    "template_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "template_id"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "get_exercise_template",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Get Exercise Template"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Every set performed for ONE exercise across all workouts — the right tool\nfor progression, personal records and plateaus.\n\nPrefer this over paging ``list_workouts``: that caps at 10 workouts per call,\nso answering \"how has my bench moved this year\" through it costs dozens of\nrequests. Here it is one.\n\n``exercise_template_id`` comes from ``search_exercise_templates``.\n``start_date`` / ``end_date`` are optional ISO-8601 timestamps (e.g.\n'2026-01-01T00:00:00Z'); pass at least ``start_date`` for a long-running\nexercise, since the response is unpaginated and returns one entry per set.\nEach entry carries the workout it came from (id, title, start/end time) plus\nthe set itself (weight_kg, reps, distance_meters, duration_seconds, rpe,\nset_type), so sets can be grouped into sessions by ``workout_id``.",
+  "inputSchema": {
+   "properties": {
+    "exercise_template_id": {
+     "type": "string"
+    },
+    "start_date": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "end_date": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    }
+   },
+   "required": [
+    "exercise_template_id"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "get_exercise_history",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Get Exercise History"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Create a new routine (a reusable training plan / workout template).\n\n``exercises`` is an ordered list; each needs an ``exercise_template_id`` (from\n``search_exercise_templates``) and its ``sets``. For routines, set targets are\nthe planned weight/reps. Returns the created routine (with its new id).",
+  "inputSchema": {
+   "properties": {
+    "title": {
+     "type": "string"
+    },
+    "exercises": {
+     "items": {
+      "description": "One exercise slot. ``exercise_template_id`` comes from\n``search_exercise_templates``. Group exercises into a superset by giving them\nthe same integer ``superset_id`` (null = not in a superset).",
+      "properties": {
+       "exercise_template_id": {
+        "type": "string"
+       },
+       "sets": {
+        "items": {
+         "description": "One set. Provide the fields relevant to the exercise type: weight_kg+reps\nfor lifts, duration_seconds for planks/cardio, distance_meters for runs.",
+         "properties": {
+          "type": {
+           "default": "normal",
+           "description": "warmup | normal | failure | dropset",
+           "enum": [
+            "warmup",
+            "normal",
+            "failure",
+            "dropset"
+           ],
+           "type": "string"
+          },
+          "weight_kg": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null,
+           "description": "Weight in kilograms"
+          },
+          "reps": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "distance_meters": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "duration_seconds": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "rpe": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null,
+           "description": "Rate of perceived exertion 6–10 (workouts only)"
+          },
+          "custom_metric": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          }
+         },
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "superset_id": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null
+       },
+       "rest_seconds": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "description": "Rest after this exercise (routines)"
+       },
+       "notes": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null
+       }
+      },
+      "required": [
+       "exercise_template_id",
+       "sets"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "notes": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "folder_id": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    }
+   },
+   "required": [
+    "title",
+    "exercises"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "create_routine",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Create Routine"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Replace an existing routine's contents (title, notes, full exercise list).\n\nThis overwrites the routine — fetch it with ``get_routine`` first if you only\nwant to tweak part of it, then send the complete desired state.",
+  "inputSchema": {
+   "properties": {
+    "routine_id": {
+     "type": "string"
+    },
+    "title": {
+     "type": "string"
+    },
+    "exercises": {
+     "items": {
+      "description": "One exercise slot. ``exercise_template_id`` comes from\n``search_exercise_templates``. Group exercises into a superset by giving them\nthe same integer ``superset_id`` (null = not in a superset).",
+      "properties": {
+       "exercise_template_id": {
+        "type": "string"
+       },
+       "sets": {
+        "items": {
+         "description": "One set. Provide the fields relevant to the exercise type: weight_kg+reps\nfor lifts, duration_seconds for planks/cardio, distance_meters for runs.",
+         "properties": {
+          "type": {
+           "default": "normal",
+           "description": "warmup | normal | failure | dropset",
+           "enum": [
+            "warmup",
+            "normal",
+            "failure",
+            "dropset"
+           ],
+           "type": "string"
+          },
+          "weight_kg": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null,
+           "description": "Weight in kilograms"
+          },
+          "reps": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "distance_meters": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "duration_seconds": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "rpe": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null,
+           "description": "Rate of perceived exertion 6–10 (workouts only)"
+          },
+          "custom_metric": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          }
+         },
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "superset_id": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null
+       },
+       "rest_seconds": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "description": "Rest after this exercise (routines)"
+       },
+       "notes": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null
+       }
+      },
+      "required": [
+       "exercise_template_id",
+       "sets"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "notes": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    }
+   },
+   "required": [
+    "routine_id",
+    "title",
+    "exercises"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "update_routine",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Update Routine"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Create a routine folder (e.g. 'Push/Pull/Legs'). Returns it with its id,\nwhich you can pass as ``folder_id`` to ``create_routine``.",
+  "inputSchema": {
+   "properties": {
+    "title": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "title"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "create_routine_folder",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Create Routine Folder"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Log a *completed* workout session.\n\n``start_time`` / ``end_time`` are ISO-8601 timestamps (e.g.\n'2026-07-10T18:30:00Z'). Set weights/reps are what was actually performed;\n``rpe`` is allowed here. Returns the created workout with its id.",
+  "inputSchema": {
+   "properties": {
+    "title": {
+     "type": "string"
+    },
+    "start_time": {
+     "type": "string"
+    },
+    "end_time": {
+     "type": "string"
+    },
+    "exercises": {
+     "items": {
+      "description": "One exercise slot. ``exercise_template_id`` comes from\n``search_exercise_templates``. Group exercises into a superset by giving them\nthe same integer ``superset_id`` (null = not in a superset).",
+      "properties": {
+       "exercise_template_id": {
+        "type": "string"
+       },
+       "sets": {
+        "items": {
+         "description": "One set. Provide the fields relevant to the exercise type: weight_kg+reps\nfor lifts, duration_seconds for planks/cardio, distance_meters for runs.",
+         "properties": {
+          "type": {
+           "default": "normal",
+           "description": "warmup | normal | failure | dropset",
+           "enum": [
+            "warmup",
+            "normal",
+            "failure",
+            "dropset"
+           ],
+           "type": "string"
+          },
+          "weight_kg": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null,
+           "description": "Weight in kilograms"
+          },
+          "reps": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "distance_meters": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "duration_seconds": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "rpe": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null,
+           "description": "Rate of perceived exertion 6–10 (workouts only)"
+          },
+          "custom_metric": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          }
+         },
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "superset_id": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null
+       },
+       "rest_seconds": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "description": "Rest after this exercise (routines)"
+       },
+       "notes": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null
+       }
+      },
+      "required": [
+       "exercise_template_id",
+       "sets"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "description": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "is_private": {
+     "default": false,
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "title",
+    "start_time",
+    "end_time",
+    "exercises"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "create_workout",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Create Workout"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Overwrite an existing logged workout with the full desired state.\nFetch it with ``get_workout`` first if you only mean to edit part of it.",
+  "inputSchema": {
+   "properties": {
+    "workout_id": {
+     "type": "string"
+    },
+    "title": {
+     "type": "string"
+    },
+    "start_time": {
+     "type": "string"
+    },
+    "end_time": {
+     "type": "string"
+    },
+    "exercises": {
+     "items": {
+      "description": "One exercise slot. ``exercise_template_id`` comes from\n``search_exercise_templates``. Group exercises into a superset by giving them\nthe same integer ``superset_id`` (null = not in a superset).",
+      "properties": {
+       "exercise_template_id": {
+        "type": "string"
+       },
+       "sets": {
+        "items": {
+         "description": "One set. Provide the fields relevant to the exercise type: weight_kg+reps\nfor lifts, duration_seconds for planks/cardio, distance_meters for runs.",
+         "properties": {
+          "type": {
+           "default": "normal",
+           "description": "warmup | normal | failure | dropset",
+           "enum": [
+            "warmup",
+            "normal",
+            "failure",
+            "dropset"
+           ],
+           "type": "string"
+          },
+          "weight_kg": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null,
+           "description": "Weight in kilograms"
+          },
+          "reps": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "distance_meters": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "duration_seconds": {
+           "anyOf": [
+            {
+             "type": "integer"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          },
+          "rpe": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null,
+           "description": "Rate of perceived exertion 6–10 (workouts only)"
+          },
+          "custom_metric": {
+           "anyOf": [
+            {
+             "type": "number"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          }
+         },
+         "type": "object"
+        },
+        "type": "array"
+       },
+       "superset_id": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null
+       },
+       "rest_seconds": {
+        "anyOf": [
+         {
+          "type": "integer"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null,
+        "description": "Rest after this exercise (routines)"
+       },
+       "notes": {
+        "anyOf": [
+         {
+          "type": "string"
+         },
+         {
+          "type": "null"
+         }
+        ],
+        "default": null
+       }
+      },
+      "required": [
+       "exercise_template_id",
+       "sets"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "description": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "is_private": {
+     "default": false,
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "workout_id",
+    "title",
+    "start_time",
+    "end_time",
+    "exercises"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "update_workout",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Update Workout"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "description": "Create a custom exercise template (only if none of the existing ones fit —\nsearch first). ``muscle_group`` is a Hevy enum e.g. 'chest', 'quadriceps',\n'lats'. Note: some Hevy plans may not permit custom exercises via the API.",
+  "inputSchema": {
+   "properties": {
+    "title": {
+     "type": "string"
+    },
+    "exercise_type": {
+     "enum": [
+      "weight_reps",
+      "reps_only",
+      "bodyweight_reps",
+      "bodyweight_assisted_reps",
+      "duration",
+      "weight_duration",
+      "distance_duration",
+      "short_distance_weight"
+     ],
+     "type": "string"
+    },
+    "equipment_category": {
+     "enum": [
+      "none",
+      "barbell",
+      "dumbbell",
+      "kettlebell",
+      "machine",
+      "plate",
+      "resistance_band",
+      "suspension",
+      "other"
+     ],
+     "type": "string"
+    },
+    "muscle_group": {
+     "type": "string"
+    },
+    "other_muscles": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    }
+   },
+   "required": [
+    "title",
+    "exercise_type",
+    "equipment_category",
+    "muscle_group"
+   ],
+   "type": "object",
+   "additionalProperties": false
+  },
+  "name": "create_exercise_template",
+  "outputSchema": {
+   "type": "object",
+   "additionalProperties": true
+  },
+  "title": "Create Exercise Template"
+ }
+]

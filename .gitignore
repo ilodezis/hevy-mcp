@@ -1,0 +1,6 @@
+.env
+target/
+
+# Local agent instructions, kept out of this public repo
+AGENTS.md
+CLAUDE.md

@@ -1,0 +1,3 @@
+# Keep every checkout LF: the Rust code embeds the HTML templates and the unit tests
+# compare their exact bytes, and shell scripts and Dockerfiles must run on Linux.
+* text=auto eol=lf

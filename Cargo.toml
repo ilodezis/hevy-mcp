@@ -1,0 +1,43 @@
+[package]
+name = "hevy-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Hevy MCP connector for Claude: the Hevy REST API as MCP tools, with the OAuth flow Claude.ai needs"
+license = "MIT"
+publish = false
+
+[dependencies]
+# MCP: the official SDK, streamable HTTP server (legacy sessions + 2026-07-28 stateless).
+rmcp = { version = "3.7.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
+
+# Web delivery.
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1.54", features = ["rt", "macros", "net", "time", "signal", "sync"] }
+tokio-util = "0.7"
+form_urlencoded = "1.2"
+httpdate = "1.0"
+
+# Outbound Hevy calls: plain hyper + rustls with baked-in Mozilla roots, so the
+# image needs no CA bundle and nothing parses one at startup.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1", "ring", "tls12", "webpki-tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+http-body-util = "0.1.5"
+bytes = "1"
+
+# Crypto: itsdangerous-compatible HMAC-SHA1 tokens, PKCE SHA-256, CSPRNG.
+ring = "0.17.14"
+base64 = "0.23"
+miniz_oxide = "0.9"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

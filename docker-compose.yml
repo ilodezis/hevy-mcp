@@ -1,0 +1,13 @@
+services:
+  hevy_mcp:
+    build: .
+    container_name: hevy_mcp
+    # Bind-mount .env so every process start reads it fresh (no env_file
+    # snapshot that would shadow live edits).
+    volumes:
+      - ./.env:/app/.env:ro
+    ports:
+      # Loopback only — the reverse proxy terminates TLS on the subdomain and
+      # forwards to this port. Never expose it directly to the internet.
+      - "127.0.0.1:8010:8010"
+    restart: unless-stopped

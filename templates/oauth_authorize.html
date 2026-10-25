@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="robots" content="noindex" />
+  <title>Hevy MCP — доступ</title>
+  <style>
+    :root {
+      --bg: #0b0d10; --glow-a: rgba(217, 119, 87, .16); --glow-b: rgba(79, 124, 255, .16);
+      --card: rgba(20, 23, 28, .86); --border: #242932; --line: #1d2128;
+      --text: #e9ebf0; --muted: #98a1b0; --faint: #6b7381;
+      --tile: #1a1e25; --claude: #e08a6a; --hevy: #6f93ff;
+      --accent: #4f7cff; --accent-hover: #3f6ae6; --ring: rgba(79, 124, 255, .45);
+      --yes: #3ecf8e; --yes-bg: rgba(62, 207, 142, .12); --no: #f0a04b; --no-bg: rgba(240, 160, 75, .12);
+      --err-bg: #2a1416; --err-border: #5a2027; --err-text: #ff9ba3;
+      --shadow: 0 24px 64px rgba(0, 0, 0, .45);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f4f5f8; --glow-a: rgba(217, 119, 87, .18); --glow-b: rgba(79, 124, 255, .16);
+        --card: rgba(255, 255, 255, .92); --border: #e2e5ea; --line: #eef0f3;
+        --text: #15181d; --muted: #5d6573; --faint: #8a919d;
+        --tile: #f1f3f6; --claude: #c96442; --hevy: #3d6bf0;
+        --accent: #3d6bf0; --accent-hover: #2f5ad6; --ring: rgba(61, 107, 240, .35);
+        --yes: #16a06a; --yes-bg: rgba(22, 160, 106, .10); --no: #c77712; --no-bg: rgba(199, 119, 18, .10);
+        --err-bg: #fdecee; --err-border: #f5c2c8; --err-text: #b4232f;
+        --shadow: 0 24px 64px rgba(20, 24, 31, .12);
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0; padding: 24px 16px; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 18px;
+      background:
+        radial-gradient(600px 400px at 15% 0%, var(--glow-a), transparent 70%),
+        radial-gradient(600px 400px at 85% 100%, var(--glow-b), transparent 70%),
+        var(--bg);
+      color: var(--text);
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .card {
+      width: 100%; max-width: 400px; padding: 32px 28px 24px;
+      background: var(--card); border: 1px solid var(--border); border-radius: 20px;
+      box-shadow: var(--shadow); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      animation: rise .4s ease-out both;
+    }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+    .pair { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 22px; }
+    .app {
+      width: 52px; height: 52px; border-radius: 15px; display: grid; place-items: center;
+      background: var(--tile); border: 1px solid var(--border);
+    }
+    .app svg { width: 26px; height: 26px; }
+    .app.claude { color: var(--claude); }
+    .app.hevy { color: var(--hevy); }
+    .bridge { display: flex; gap: 5px; }
+    .bridge i { width: 5px; height: 5px; border-radius: 50%; background: var(--faint); animation: flow 1.4s infinite ease-in-out; }
+    .bridge i:nth-child(2) { animation-delay: .15s; }
+    .bridge i:nth-child(3) { animation-delay: .3s; }
+    @keyframes flow { 0%, 100% { opacity: .3; transform: scale(.8); } 50% { opacity: 1; transform: scale(1.15); } }
+    .pair.broken .bridge i { animation: none; opacity: .35; }
+    .pair.broken .bridge i:nth-child(2) { background: var(--err-text); opacity: 1; }
+
+    h1 { margin: 0 0 6px; font-size: 21px; line-height: 1.3; font-weight: 650; text-align: center; letter-spacing: -.01em; }
+    .lead { margin: 0 0 22px; color: var(--muted); font-size: 14px; text-align: center; }
+    .domain {
+      color: var(--text); font-weight: 600; padding: 1px 7px; border-radius: 6px;
+      background: var(--tile); border: 1px solid var(--border); white-space: nowrap;
+    }
+
+    .scopes { list-style: none; margin: 0 0 22px; padding: 0; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+    .scopes li { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; }
+    .scopes li + li { border-top: 1px solid var(--line); }
+    .scopes .ic { flex: none; width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; }
+    .scopes .ic svg { width: 17px; height: 17px; }
+    .scopes .yes .ic { color: var(--yes); background: var(--yes-bg); }
+    .scopes .no .ic { color: var(--no); background: var(--no-bg); }
+    .scopes b { display: block; font-size: 14px; font-weight: 600; }
+    .scopes span { display: block; font-size: 13px; color: var(--muted); line-height: 1.4; }
+
+    button {
+      width: 100%; padding: 12px; border: 0; border-radius: 12px;
+      background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+      transition: background .15s, transform .05s, box-shadow .15s;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:active { transform: translateY(1px); }
+    button:focus-visible { outline: none; box-shadow: 0 0 0 4px var(--ring); }
+    button[disabled] { opacity: .7; cursor: progress; }
+
+    .fine { margin: 16px 0 0; font-size: 12.5px; color: var(--faint); text-align: center; line-height: 1.5; }
+    .fine a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+    .fine a:hover { color: var(--text); }
+    code { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }
+
+    .err {
+      margin: 0 0 14px; padding: 11px 13px; border-radius: 12px;
+      background: var(--err-bg); border: 1px solid var(--err-border); color: var(--err-text); font-size: 14px;
+    }
+    .hint { margin: 0; color: var(--muted); font-size: 13px; text-align: center; }
+
+    footer { font-size: 12px; color: var(--faint); }
+    @media (max-width: 380px) { .card { padding: 26px 18px 20px; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main class="card">
+    {% if error %}
+    <div class="pair broken" aria-hidden="true">
+      <span class="app claude"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3.5v17M3.5 12h17M6 6l12 12M18 6 6 18"/></svg></span>
+      <span class="bridge"><i></i><i></i><i></i></span>
+      <span class="app hevy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6.5 6.5v11M17.5 6.5v11M3 9.5v5M21 9.5v5M6.5 12h11"/></svg></span>
+    </div>
+    <h1>Не получилось подключить</h1>
+    <p class="lead">Сервер отклонил запрос на авторизацию.</p>
+    <div class="err" role="alert">{{ error }}</div>
+    <p class="hint">Проверь URL и client_id коннектора в настройках Claude и переменные <code>HEVY_MCP_*</code> в <code>.env</code> на сервере.</p>
+    {% else %}
+    <div class="pair" aria-hidden="true">
+      <span class="app claude"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3.5v17M3.5 12h17M6 6l12 12M18 6 6 18"/></svg></span>
+      <span class="bridge"><i></i><i></i><i></i></span>
+      <span class="app hevy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6.5 6.5v11M17.5 6.5v11M3 9.5v5M21 9.5v5M6.5 12h11"/></svg></span>
+    </div>
+    <h1>Подключить Claude к Hevy</h1>
+    <p class="lead"><span class="domain">{{ redirect_domain }}</span> просит доступ к&nbsp;твоему Hevy</p>
+    <ul class="scopes">
+      <li class="yes">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></svg></span>
+        <div><b>Читать</b><span>тренировки, программы, папки и историю упражнений</span></div>
+      </li>
+      <li class="yes">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="m14.5 7.5 3 3"/></svg></span>
+        <div><b>Записывать</b><span>новые тренировки, программы и упражнения, правки существующих</span></div>
+      </li>
+      <li class="no">
+        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5.5c0 4.2 3 7.8 7 9.5 4-1.7 7-5.3 7-9.5V6l-7-3z"/><path d="m9 12 2 2 4-4"/></svg></span>
+        <div><b>Удалять не сможет</b><span>в API Hevy нет удаления, так что ничего не пропадёт</span></div>
+      </li>
+    </ul>
+    <form method="post" action="/oauth/authorize/approve" onsubmit="var b=this.querySelector('button');b.disabled=true;b.textContent='Подключаю…'">
+      <input type="hidden" name="client_id" value="{{ client_id }}" />
+      <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}" />
+      <input type="hidden" name="state" value="{{ state or '' }}" />
+      <input type="hidden" name="code_challenge" value="{{ code_challenge or '' }}" />
+      <input type="hidden" name="code_challenge_method" value="{{ code_challenge_method or '' }}" />
+      <button type="submit" autofocus>Разрешить доступ</button>
+    </form>
+    <p class="fine">Отключить можно в любой момент:<br />Claude&nbsp;→ Settings&nbsp;→ Connectors.<br />Клиент <code>{{ client_id }}</code> · <a href="/logout">Выйти</a></p>
+    {% endif %}
+  </main>
+  <footer>Hevy MCP · личный коннектор</footer>
+  <script>
+    // Re-enable the button when the page comes back from the bfcache (browser "back").
+    addEventListener("pageshow", function (e) {
+      var b = document.querySelector("form button");
+      if (e.persisted && b) { b.disabled = false; b.textContent = "Разрешить доступ"; }
+    });
+  </script>
+</body>
+</html>
