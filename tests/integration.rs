@@ -212,7 +212,11 @@ impl Resp {
     fn rpc_payload(&self) -> Value {
         for line in self.body.lines() {
             if let Some(data) = line.strip_prefix("data:") {
-                return serde_json::from_str(data).unwrap_or_else(|e| panic!("bad SSE data ({e}): {data}"));
+                let trimmed = data.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                return serde_json::from_str(trimmed).unwrap_or_else(|e| panic!("bad SSE data ({e}): {data}"));
             }
         }
         self.json()
@@ -756,5 +760,111 @@ async fn issued_credentials_use_the_signed_formats() {
     assert_eq!(
         token_serializer().loads(body["access_token"].as_str().expect("access_token"), 60),
         Some(json!({"client_id": CLIENT_ID, "type": "mcp_access_token"}))
+    );
+}
+
+#[tokio::test]
+async fn acceptance_handshake_revision_initialize_list_and_call() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    let listed = mcp.rpc("tools/list", json!({})).await;
+    assert_eq!(listed["tools"].as_array().map(Vec::len), Some(17));
+
+    hevy.reply_json(200, &json!({"workout_count": 42}));
+    let result = mcp.call_tool("workout_count", json!({})).await;
+    assert_eq!(tool_json(&result), json!({"workout_count": 42}));
+}
+
+#[tokio::test]
+async fn acceptance_revision_2026_07_28_discover_cache_scope_and_subscriptions_listen() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(true).await;
+
+    // 1. server/discover succeeds
+    let discover = mcp.rpc("server/discover", json!({})).await;
+    assert!(discover.get("capabilities").is_some(), "discover capabilities: {discover}");
+    assert!(discover.get("supportedVersions").is_some(), "discover supportedVersions: {discover}");
+
+    // 2. tools/list carries cacheScope of "public" or "private"
+    let tools = mcp.rpc("tools/list", json!({})).await;
+    let scope = tools["cacheScope"].as_str().unwrap_or_default();
+    assert!(
+        scope == "public" || scope == "private",
+        "tools/list cacheScope should be 'public' or 'private', got: {tools}"
+    );
+
+    // 3. subscriptions/listen answers 200 text/event-stream, and its first event
+    // (notifications/subscriptions/acknowledged) arrives within 2 s while the stream stays open.
+    let token = mint_token(CLIENT_ID);
+    let builder = hyper::Request::builder()
+        .method(Method::POST)
+        .uri(format!("{}/mcp/", server.base))
+        .header("authorization", format!("Bearer {token}"))
+        .header("accept", ACCEPT)
+        .header("mcp-protocol-version", MODERN)
+        .header("mcp-method", "subscriptions/listen")
+        .header("content-type", "application/json");
+
+    let body = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": "sub-1",
+        "method": "subscriptions/listen",
+        "params": {
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MODERN,
+                "io.modelcontextprotocol/clientCapabilities": {},
+            },
+            "notifications": {
+                "toolsListChanged": true,
+            },
+        },
+    }))
+    .expect("body JSON");
+
+    let req = builder.body(Full::new(Bytes::from(body))).expect("valid request");
+    let resp = server.client.request(req).await.expect("send request");
+    assert_eq!(resp.status(), 200);
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "expected text/event-stream, got {content_type}"
+    );
+
+    let mut incoming = resp.into_body();
+    let mut buffer = String::new();
+    let start = Instant::now();
+    let mut ack_received = false;
+
+    while start.elapsed() < Duration::from_secs(2) {
+        let frame_result = tokio::time::timeout(Duration::from_millis(500), incoming.frame()).await;
+        if let Ok(Some(Ok(frame))) = frame_result {
+            if let Some(data) = frame.data_ref() {
+                buffer.push_str(&String::from_utf8_lossy(data));
+                if buffer.contains("notifications/subscriptions/acknowledged") {
+                    ack_received = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        ack_received,
+        "did not receive notifications/subscriptions/acknowledged within 2s; buffer: {buffer}"
+    );
+
+    // Verify stream stays open: reading another frame with a short timeout does not return EOF (None)
+    let next_frame = tokio::time::timeout(Duration::from_millis(200), incoming.frame()).await;
+    assert!(
+        matches!(next_frame, Err(_) | Ok(Some(_))),
+        "stream should stay open, but closed early: {next_frame:?}"
     );
 }

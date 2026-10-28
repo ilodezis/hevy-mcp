@@ -130,8 +130,8 @@ An exercise slot is `{exercise_template_id, sets, superset_id?, rest_seconds?, n
 
 - **Nothing can be deleted.** Hevy's public API has no delete endpoints, so there is no delete tool. Claude can overwrite a workout or routine but not remove one.
 - **Errors are data, not crashes.** A bad id, a missing API key or a Hevy 4xx comes back as `{"error": "..."}` so the model can read it and recover. Hevy error bodies are cut to 400 characters. Calls to Hevy time out after 30 seconds.
-- **Arguments are validated before anything reaches Hevy**, with coercion in the style of pydantic: `"2"` becomes `2`, `"yes"` becomes `true`, unknown arguments are rejected. Failures return pydantic's error report verbatim, and models have learned to read it.
-- **Both MCP revisions are served:** the session-based streamable HTTP transport (responses over SSE) and the stateless `2026-07-28` revision (plain JSON).
+- **Arguments are validated before anything reaches Hevy**, with lenient coercion: `"2"` becomes `2`, `"yes"` becomes `true`, unknown arguments are rejected.
+- **Both MCP revisions are served:** the session-based streamable HTTP transport and the stateless `2026-07-28` revision.
 
 ## Security model
 

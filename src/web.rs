@@ -430,52 +430,7 @@ async fn mcp_endpoint(app: &App, req: Request, path: &str) -> Response {
     if path != "/mcp/" {
         return response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "Not Found");
     }
-    let method = req.method().clone();
-    let session = req.headers().get("mcp-session-id").cloned();
-    let resp = app.mcp.handle(req).await.map(Body::new);
-    like_python_sdk(resp, &method, session).await
-}
-
-/// Align rmcp's transport-level replies with what the Python SDK sent: the
-/// session id echoed on every in-session response, `200` for a session
-/// DELETE, a JSON content type on bodiless acks, and JSON-RPC error objects
-/// (not plain text) for transport errors.
-async fn like_python_sdk(mut resp: Response, method: &Method, session: Option<HeaderValue>) -> Response {
-    let status = resp.status();
-    if status.is_success() {
-        if let Some(session) = session
-            && !resp.headers().contains_key("mcp-session-id")
-        {
-            resp.headers_mut().insert("mcp-session-id", session);
-        }
-        if *method == Method::DELETE && status == StatusCode::ACCEPTED {
-            *resp.status_mut() = StatusCode::OK;
-        }
-        if !resp.headers().contains_key(header::CONTENT_TYPE) {
-            resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        }
-        return resp;
-    }
-    if status == StatusCode::METHOD_NOT_ALLOWED {
-        let (mut parts, _) = resp.into_parts();
-        parts.headers.remove(header::CONTENT_LENGTH);
-        return Response::from_parts(parts, Body::empty());
-    }
-    if !status.is_client_error() || resp.headers().contains_key(header::CONTENT_TYPE) {
-        return resp;
-    }
-    let (mut parts, body) = resp.into_parts();
-    let text = read_body(body).await.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-    let message = match text.as_str() {
-        "Bad Request: Session ID is required" => "Bad Request: Missing session ID",
-        "Not Found: Session not found" => "Session not found",
-        other => other,
-    };
-    let body = serde_json::to_vec(&json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": message}}))
-        .expect("JSON value");
-    parts.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    parts.headers.remove(header::CONTENT_LENGTH);
-    Response::from_parts(parts, Body::from(body))
+    app.mcp.handle(req).await.map(Body::new)
 }
 
 // ── Login gate ───────────────────────────────────────────────────────────────

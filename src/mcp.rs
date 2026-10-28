@@ -5,10 +5,10 @@
 //!   * A recoverable problem (bad id, not configured, Hevy 4xx) — a dict
 //!     `{"error": "<human message>"}`.
 //!
-//! The tool definitions in `tools.json` are the exact `tools/list` entries the
-//! FastMCP server published (names, titles, descriptions, input and output
-//! schemas), and results are shaped the way FastMCP shaped them: a JSON text
-//! block plus `structuredContent`, with list results wrapped as `{"result": …}`.
+//! The tool definitions in `tools.json` define the `tools/list` entries
+//! (names, titles, descriptions, input and output schemas), and results are
+//! shaped as a JSON text block plus `structuredContent`, with list results
+//! wrapped as `{"result": …}`.
 //!
 //! Building a routine is a two-step dance the model should follow:
 //!   1. `search_exercise_templates("bench press")` → get the `exercise_template_id`.
@@ -23,10 +23,9 @@ use std::sync::{Arc, LazyLock};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, DiscoverResult,
-        Implementation, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
-        ListToolsResult, MetaObject, PaginatedRequestParams, ProtocolVersion, ServerCapabilities,
-        ServerConfig, Tool,
+        CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
+        SubscriptionFilter, Tool,
     },
     service::RequestContext,
 };
@@ -40,45 +39,8 @@ use crate::{
 static TOOLS: LazyLock<Vec<Tool>> =
     LazyLock::new(|| serde_json::from_str(include_str!("tools.json")).expect("valid tools.json"));
 
-/// What FastMCP advertised on `initialize` (legacy sessions)…
-static CAPABILITIES: LazyLock<ServerCapabilities> = LazyLock::new(|| {
-    serde_json::from_value(json!({
-        "logging": {},
-        "prompts": {"listChanged": true},
-        "resources": {"subscribe": false, "listChanged": true},
-        "tools": {"listChanged": true},
-    }))
-    .expect("valid capabilities")
-});
-
-/// …and on `server/discover` (2026-07-28, which has no standing stream for
-/// change notifications).
-static DISCOVER_CAPABILITIES: LazyLock<ServerCapabilities> = LazyLock::new(|| {
-    serde_json::from_value(json!({
-        "logging": {},
-        "prompts": {"listChanged": false},
-        "resources": {"subscribe": false, "listChanged": false},
-        "tools": {"listChanged": false},
-        "extensions": {"io.modelcontextprotocol/ui": {}},
-    }))
-    .expect("valid capabilities")
-});
-
 fn server_info() -> Implementation {
     Implementation::new("Hevy", env!("CARGO_PKG_VERSION"))
-}
-
-/// 2026-07-28 has no `initialize`, so every result names the server in
-/// `_meta`, as the Python SDK did.
-fn is_modern(context: &RequestContext<RoleServer>) -> bool {
-    context
-        .protocol_version()
-        .is_some_and(|v| v.as_str() >= ProtocolVersion::V_2026_07_28.as_str())
-}
-
-fn with_server_info(meta: &mut Option<MetaObject>) {
-    meta.get_or_insert_default()
-        .insert("io.modelcontextprotocol/serverInfo".into(), json!(server_info()));
 }
 
 #[derive(Clone)]
@@ -94,86 +56,39 @@ impl HevyMcp {
 
 impl ServerHandler for HevyMcp {
     fn get_info(&self) -> ServerConfig {
-        let mut info = ServerConfig::new(CAPABILITIES.clone());
+        let mut info = ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        );
         info.server_info = server_info();
         info
     }
 
-    /// Legacy revisions stay negotiable through `initialize`, but discovery
-    /// advertises only the stateless revision, like FastMCP.
-    async fn discover(&self, _context: RequestContext<RoleServer>) -> Result<DiscoverResult, McpError> {
-        let mut info = self.get_info();
-        info.capabilities = DISCOVER_CAPABILITIES.clone();
-        Ok(DiscoverResult::from_server_info(vec![ProtocolVersion::V_2026_07_28], info))
-    }
-
-    /// FastMCP accepted `logging/setLevel` (it advertises `logging`); so do we.
-    #[allow(deprecated)]
-    async fn set_level(
+    fn accepted_subscription_filter(
         &self,
-        _request: rmcp::model::SetLevelRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<(), McpError> {
-        Ok(())
-    }
-
-    async fn list_resources(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListResourcesResult, McpError> {
-        let mut result = ListResourcesResult::default();
-        if is_modern(&context) {
-            with_server_info(&mut result.meta);
-        }
-        Ok(result)
-    }
-
-    async fn list_resource_templates(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListResourceTemplatesResult, McpError> {
-        let mut result = ListResourceTemplatesResult::default();
-        if is_modern(&context) {
-            with_server_info(&mut result.meta);
-        }
-        Ok(result)
-    }
-
-    async fn list_prompts(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListPromptsResult, McpError> {
-        let mut result = ListPromptsResult::default();
-        if is_modern(&context) {
-            with_server_info(&mut result.meta);
-        }
-        Ok(result)
+        requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        Some(requested.supported_by(&self.get_info().capabilities))
     }
 
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
+        _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut result = ListToolsResult::with_all_items(TOOLS.clone());
-        if is_modern(&context) {
-            with_server_info(&mut result.meta);
-        }
+        result.cache_scope = Some(CacheScope::Public);
         Ok(result)
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
+        _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let mut result = self.call(&request).await;
-        if is_modern(&context) {
-            with_server_info(&mut result.meta);
-        }
+        let result = self.call(&request).await;
         Ok(result.into())
     }
 }
@@ -201,14 +116,10 @@ fn dict_result(value: Value) -> CallToolResult {
     result
 }
 
-/// FastMCP wraps non-object results so `structuredContent` stays an object.
 fn list_result(items: Vec<Value>) -> CallToolResult {
     let items = Value::Array(items);
     let mut result = CallToolResult::success(vec![text(&items)]);
     result.structured_content = Some(json!({"result": items}));
-    let mut meta = MetaObject::new();
-    meta.insert("fastmcp".into(), json!({"wrap_result": true}));
-    result.meta = Some(meta);
     result
 }
 

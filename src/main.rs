@@ -70,16 +70,9 @@ async fn serve(cfg: Config, bind: SocketAddr) {
     let shutdown = CancellationToken::new();
     let mut sessions = LocalSessionManager::default();
     sessions.session_config.keep_alive = Some(SESSION_IDLE);
-    // No SSE priming events: FastMCP never sent them, and an empty `data:`
-    // ahead of the response trips clients that read the first event only.
-    sessions.session_config.sse_retry = None;
     let mcp_config = StreamableHttpServerConfig::default()
-        .with_sse_retry(None)
-        // 2026-07-28 requests get a plain JSON reply, as FastMCP sent them;
-        // legacy sessions keep answering over SSE either way.
-        .with_json_response(true)
-        // The reverse proxy forwards the public Host; the earlier FastMCP server
-        // did no Host/Origin checks either.
+        // The reverse proxy forwards the public Host; public host validation
+        // would require new configuration not present in existing deployments.
         .disable_allowed_hosts()
         .with_cancellation_token(shutdown.child_token());
     let mcp = StreamableHttpService::new(
