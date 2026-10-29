@@ -456,6 +456,8 @@ fn case(name: &'static str, args: Value, method: &'static str, path: &'static st
 fn cases() -> Vec<Case> {
     let mut update_workout = workout();
     update_workout["workout_id"] = json!("w1");
+    update_workout["is_private"] = json!(false);
+    update_workout["description"] = json!("Test description");
     vec![
         case("workout_count", json!({}), "GET", "/v1/workouts/count"),
         case("list_workouts", json!({"page_size": 50}), "GET", "/v1/workouts"),
@@ -485,7 +487,7 @@ fn cases() -> Vec<Case> {
         case("create_routine", json!({"title": "Test routine", "exercises": exercises()}), "POST", "/v1/routines"),
         case(
             "update_routine",
-            json!({"routine_id": "r1", "title": "Test routine", "exercises": exercises()}),
+            json!({"routine_id": "r1", "title": "Test routine", "notes": "Test notes", "exercises": exercises()}),
             "PUT",
             "/v1/routines/r1",
         ),
@@ -867,4 +869,364 @@ async fn acceptance_revision_2026_07_28_discover_cache_scope_and_subscriptions_l
         matches!(next_frame, Err(_) | Ok(Some(_))),
         "stream should stay open, but closed early: {next_frame:?}"
     );
+}
+
+#[tokio::test]
+async fn test_update_workout_safe_defaults() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // 1. Initial workout on Hevy with is_private = true and non-empty description
+    let initial_workout = json!({
+        "workout": {
+            "id": "w_safe",
+            "title": "Private Leg Day",
+            "description": "Heavy squats, secret notes",
+            "is_private": true,
+            "start_time": "2026-09-01T10:00:00Z",
+            "end_time": "2026-09-01T11:00:00Z",
+            "exercises": exercises()
+        }
+    });
+    hevy.reply_json(200, &initial_workout);
+
+    // 2. Read the workout via get_workout
+    let read_res = mcp.call_tool("get_workout", json!({"workout_id": "w_safe"})).await;
+    assert!(!read_res["isError"].as_bool().unwrap_or(false));
+    let seen_read = hevy.take();
+    assert_eq!(seen_read.len(), 1);
+    assert_eq!(seen_read[0].path, "/v1/workouts/w_safe");
+
+    // 3. Update workout WITHOUT providing is_private or description. The mock
+    // answers every request with one body, so it keeps serving the private
+    // workout: that is what the connector's GET must see before its PUT.
+    hevy.reply_json(200, &initial_workout);
+    let mut update_args = workout();
+    update_args["workout_id"] = json!("w_safe");
+    update_args["title"] = json!("Updated Leg Day");
+    assert!(update_args.get("is_private").is_none());
+    assert!(update_args.get("description").is_none());
+
+    let update_res = mcp.call_tool("update_workout", update_args).await;
+    assert!(!update_res["isError"].as_bool().unwrap_or(false));
+
+    // The connector must read the workout first, then issue PUT with preserved fields
+    let seen_update = hevy.take();
+    assert_eq!(seen_update.len(), 2, "Expected GET then PUT");
+    assert_eq!(seen_update[0].method, "GET");
+    assert_eq!(seen_update[0].path, "/v1/workouts/w_safe");
+    assert_eq!(seen_update[1].method, "PUT");
+    assert_eq!(seen_update[1].path, "/v1/workouts/w_safe");
+
+    let put_body: Value = serde_json::from_slice(&seen_update[1].body).expect("valid PUT body JSON");
+    let sent_workout = &put_body["workout"];
+    assert_eq!(
+        sent_workout["is_private"],
+        json!(true),
+        "is_private must be preserved from existing workout"
+    );
+    assert_eq!(
+        sent_workout["description"],
+        json!("Heavy squats, secret notes"),
+        "description must be preserved from existing workout"
+    );
+    assert_eq!(sent_workout["title"], json!("Updated Leg Day"));
+}
+
+#[tokio::test]
+async fn test_search_exercise_templates_russian_and_empty() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // The mock answers every path with this one body: the template library for
+    // /v1/exercise_templates, and a workout logged in Russian for /v1/workouts.
+    let templates = json!({
+        "page_count": 1,
+        "workouts": [{
+            "id": "w1",
+            "exercises": [
+                {"exercise_template_id": "7EB3F7C3", "title": "Жим от груди (Тренажёр)"},
+                {"exercise_template_id": "other_1", "title": "Bicep Curl"}
+            ]
+        }],
+        "exercise_templates": [
+            {
+                "id": "7EB3F7C3",
+                "title": "Chest Press (Machine)",
+                "type": "weight_reps",
+                "primary_muscle_group": "chest",
+                "equipment": "machine",
+                "is_custom": false
+            },
+            {
+                "id": "other_1",
+                "title": "Bicep Curl",
+                "type": "weight_reps",
+                "primary_muscle_group": "biceps",
+                "equipment": "dumbbell",
+                "is_custom": false
+            }
+        ]
+    });
+    hevy.reply_json(200, &templates);
+
+    // 1. Search with Russian term "жим"
+    let res = mcp.call_tool("search_exercise_templates", json!({"query": "жим"})).await;
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    let items = tool_json(&res);
+    let items_arr = items.as_array().expect("array of results");
+    assert_eq!(items_arr.len(), 1);
+    assert_eq!(items_arr[0]["id"], "7EB3F7C3");
+    assert_eq!(items_arr[0]["title"], "Chest Press (Machine)");
+    assert_eq!(items_arr[0]["title_ru"], "Жим от груди (Тренажёр)");
+    assert!(hevy.take().iter().any(|s| s.path == "/v1/workouts"), "Russian titles come from logged workouts");
+
+    // 1b. ё and е are the same letter for the search
+    let res = mcp.call_tool("search_exercise_templates", json!({"query": "тренажер"})).await;
+    assert_eq!(tool_json(&res).as_array().expect("array").len(), 1);
+
+    // 1c. a Russian word matches only exercises logged under it, not every "press"
+    let res = mcp.call_tool("search_exercise_templates", json!({"query": "присед"})).await;
+    assert_eq!(tool_json(&res), json!([]));
+
+    // 2. Search for non-matching term returns empty array [] (not error object)
+    hevy.reply_json(200, &templates);
+    let empty_res = mcp.call_tool("search_exercise_templates", json!({"query": "nonexistent_query"})).await;
+    assert!(!empty_res["isError"].as_bool().unwrap_or(false));
+    let empty_items = tool_json(&empty_res);
+    assert_eq!(empty_items, json!([]));
+
+    // 3. get_exercise_template returns title_ru and strips thumbnail_url
+    let single_template = json!({
+        "id": "7EB3F7C3",
+        "title": "Chest Press (Machine)",
+        "type": "weight_reps",
+        "primary_muscle_group": "chest",
+        "equipment": "machine",
+        "thumbnail_url": "https://pump-app.s3.eu-west-2.amazonaws.com/exercise-thumbnails/05771201.jpg"
+    });
+    hevy.reply_json(200, &single_template);
+    let tmpl_res = mcp.call_tool("get_exercise_template", json!({"template_id": "7EB3F7C3"})).await;
+    assert!(!tmpl_res["isError"].as_bool().unwrap_or(false));
+    let tmpl_json = tool_json(&tmpl_res);
+    assert_eq!(tmpl_json["title_ru"], "Жим от груди (Тренажёр)");
+    assert!(tmpl_json.get("thumbnail_url").is_none(), "thumbnail_url should be removed");
+
+    // 4. an upstream failure is an MCP error, not "nothing found"
+    hevy.reply_text(401, "{\"error\": \"Invalid api key\"}");
+    let failed = mcp.call_tool("search_exercise_templates", json!({"query": "bench"})).await;
+    assert!(failed["isError"].as_bool().unwrap_or(false), "{failed}");
+}
+
+#[tokio::test]
+async fn test_routine_folders_normalizes_routines_key() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // Upstream Hevy returns 'routines' key instead of 'routine_folders'
+    hevy.reply_json(
+        200,
+        &json!({
+            "page": 1,
+            "page_count": 1,
+            "routines": [{"id": 10, "title": "Push / Pull / Legs"}]
+        }),
+    );
+
+    let res = mcp.call_tool("list_routine_folders", json!({})).await;
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    let payload = tool_json(&res);
+    assert!(payload.get("routines").is_none(), "Key 'routines' must be normalized");
+    assert_eq!(
+        payload["routine_folders"],
+        json!([{"id": 10, "title": "Push / Pull / Legs"}])
+    );
+}
+
+#[tokio::test]
+async fn test_error_handling_and_404_conventions() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // 1. Paginated out-of-bounds page returns empty list with page_count (not error)
+    hevy.reply_text(404, r#"{"error": "Page not found"}"#);
+    let list_res = mcp.call_tool("list_workouts", json!({"page": 99})).await;
+    assert!(!list_res["isError"].as_bool().unwrap_or(false));
+    let list_payload = tool_json(&list_res);
+    assert_eq!(list_payload["page"], 99);
+    assert_eq!(list_payload["page_count"], 0);
+    assert_eq!(list_payload["workouts"], json!([]));
+
+    // 2. Entity lookup 404 returns MCP isError: true with clean message
+    hevy.reply_text(404, "Workout not found");
+    let get_res = mcp.call_tool("get_workout", json!({"workout_id": "00000000-0000"})).await;
+    assert_eq!(get_res["isError"], true);
+    let err_payload = tool_json(&get_res);
+    assert_eq!(err_payload["error"], "workout 00000000-0000 not found");
+}
+
+#[tokio::test]
+async fn test_exercise_history_grouping_and_null_stripping() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    let flat_history = json!({
+        "exercise_history": [
+            {
+                "workout_id": "w1",
+                "workout_title": "Chest Day",
+                "workout_start_time": "2026-08-01T10:00:00+00:00",
+                "workout_end_time": "2026-08-01T11:00:00Z",
+                "exercise_template_id": "7EB3F7C3",
+                "weight_kg": 60.0,
+                "reps": 10,
+                "set_type": "normal",
+                "distance_meters": null,
+                "duration_seconds": null,
+                "rpe": null,
+                "custom_metric": null
+            },
+            {
+                "workout_id": "w1",
+                "workout_title": "Chest Day",
+                "workout_start_time": "2026-08-01T10:00:00+00:00",
+                "workout_end_time": "2026-08-01T11:00:00Z",
+                "exercise_template_id": "7EB3F7C3",
+                "weight_kg": 65.0,
+                "reps": 8,
+                "set_type": "normal",
+                "distance_meters": null,
+                "duration_seconds": null,
+                "rpe": 8.5,
+                "custom_metric": null
+            }
+        ]
+    });
+
+    // 1. Regular grouping (sets have set_index, null fields are stripped)
+    hevy.reply_json(200, &flat_history);
+    let res = mcp.call_tool("get_exercise_history", json!({"exercise_template_id": "7EB3F7C3"})).await;
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    let payload = tool_json(&res);
+    assert_eq!(payload["common"]["exercise_template_id"], "7EB3F7C3");
+    let workouts = payload["workouts"].as_array().expect("workouts array");
+    assert_eq!(workouts.len(), 1);
+    let w1 = &workouts[0];
+    assert_eq!(w1["workout_id"], "w1");
+    let sets = w1["sets"].as_array().expect("sets array");
+    assert_eq!(sets.len(), 2);
+    assert_eq!(sets[0]["set_index"], 1);
+    assert_eq!(sets[0]["weight_kg"], 60.0);
+    assert!(sets[0].get("distance_meters").is_none(), "null fields must be stripped");
+    assert_eq!(sets[1]["set_index"], 2);
+    assert_eq!(sets[1]["rpe"], 8.5);
+
+    // 2. Summary mode (top_set, volume_kg, estimated_1rm calculated)
+    hevy.reply_json(200, &flat_history);
+    let sum_res = mcp
+        .call_tool(
+            "get_exercise_history",
+            json!({"exercise_template_id": "7EB3F7C3", "summary": true}),
+        )
+        .await;
+    assert!(!sum_res["isError"].as_bool().unwrap_or(false));
+    let sum_payload = tool_json(&sum_res);
+    let sum_w1 = &sum_payload["workouts"][0];
+    assert_eq!(sum_w1["top_set"], json!({"weight_kg": 65.0, "reps": 8}));
+    assert_eq!(sum_w1["volume_kg"], json!(1120.0));
+    assert_eq!(sum_w1["estimated_1rm"], json!(82.3));
+}
+
+#[tokio::test]
+async fn test_list_workouts_and_routines_summary_mode() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    let raw_workouts = json!({
+        "page": 1,
+        "page_count": 1,
+        "workouts": [
+            {
+                "id": "w1",
+                "title": "Chest & Triceps",
+                "start_time": "2026-08-04T13:33:10+00:00",
+                "end_time": "2026-08-04T14:28:51.015Z",
+                "exercises": [
+                    {
+                        "title": "Chest Press (Machine)",
+                        "sets": [
+                            {"weight_kg": 60.0, "reps": 10, "distance_meters": null},
+                            {"weight_kg": 65.0, "reps": 8, "distance_meters": null}
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+
+    // 1. Default summary mode returns compact workout representation
+    hevy.reply_json(200, &raw_workouts);
+    let res = mcp.call_tool("list_workouts", json!({})).await;
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    let payload = tool_json(&res);
+    let w1 = &payload["workouts"][0];
+    assert_eq!(w1["id"], "w1");
+    assert_eq!(w1["title"], "Chest & Triceps");
+    assert_eq!(w1["start_time"], "2026-08-04T13:33:10Z");
+    assert_eq!(w1["start_time_local"], "2026-08-04T16:33:10+03:00");
+    assert_eq!(w1["duration_min"], 55);
+    assert_eq!(w1["exercises_count"], 1);
+    assert_eq!(w1["volume_kg"], 1120.0);
+    assert_eq!(w1["exercises"], json!(["Chest Press (Machine)"]));
+    assert!(w1.get("sets").is_none(), "summary mode omits detailed sets");
+
+    // 2. Full mode returns complete workout tree
+    hevy.reply_json(200, &raw_workouts);
+    let full_res = mcp.call_tool("list_workouts", json!({"detail": "full"})).await;
+    assert!(!full_res["isError"].as_bool().unwrap_or(false));
+    let full_payload = tool_json(&full_res);
+    let full_w1 = &full_payload["workouts"][0];
+    assert!(full_w1.get("exercises").is_some());
+    assert!(full_w1["exercises"][0].get("sets").is_some());
+
+    // 3. Routines summary mode
+    let raw_routines = json!({
+        "page": 1,
+        "page_count": 1,
+        "routines": [
+            {
+                "id": "r1",
+                "title": "Push Day",
+                "folder_id": 1,
+                "updated_at": "2026-08-04T10:00:00.000Z",
+                "exercises": [
+                    {
+                        "title": "Bench Press",
+                        "sets": [{"weight_kg": 80.0, "reps": 5}]
+                    }
+                ]
+            }
+        ]
+    });
+    hevy.reply_json(200, &raw_routines);
+    let r_res = mcp.call_tool("list_routines", json!({})).await;
+    assert!(!r_res["isError"].as_bool().unwrap_or(false));
+    let r_payload = tool_json(&r_res);
+    let r1 = &r_payload["routines"][0];
+    assert_eq!(r1["id"], "r1");
+    assert_eq!(r1["title"], "Push Day");
+    assert_eq!(r1["exercises"], json!(["Bench Press"]));
+    assert_eq!(r1["updated_at"], "2026-08-04T10:00:00Z");
 }
