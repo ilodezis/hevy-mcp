@@ -1350,6 +1350,85 @@ async fn test_regression_b4_bodyweight_assisted_reps() {
     let list_payload = tool_json(&list_res);
     // Bench only = 50 * 10 = 500.0 kg. Gravitron's 200 kg assistance is not load.
     assert_eq!(list_payload["workouts"][0]["volume_kg"], json!(500.0));
+
+    // Template D23C609B (gravitron) with wrapped JSON response and type "bodyweight_assisted"
+    let gravitron_template = json!({
+        "exercise_template": {
+            "id": "D23C609B",
+            "title": "Assisted Pull Up (Gravitron)",
+            "type": "bodyweight_assisted",
+            "primary_muscle_group": "lats"
+        }
+    });
+    hevy.route_json("/v1/exercise_templates/D23C609B", 200, &gravitron_template);
+
+    let gravitron_history = json!({
+        "exercise_history": [
+            {
+                "workout_id": "gw1",
+                "workout_title": "Back Day",
+                "workout_start_time": "2026-08-02T10:00:00Z",
+                "workout_end_time": "2026-08-02T11:00:00Z",
+                "exercise_template_id": "D23C609B",
+                "weight_kg": 40.0,
+                "reps": 10,
+                "set_type": "normal"
+            },
+            {
+                "workout_id": "gw1",
+                "workout_title": "Back Day",
+                "workout_start_time": "2026-08-02T10:00:00Z",
+                "workout_end_time": "2026-08-02T11:00:00Z",
+                "exercise_template_id": "D23C609B",
+                "weight_kg": 30.0,
+                "reps": 8,
+                "set_type": "normal"
+            },
+            {
+                "workout_id": "gw1",
+                "workout_title": "Back Day",
+                "workout_start_time": "2026-08-02T10:00:00Z",
+                "workout_end_time": "2026-08-02T11:00:00Z",
+                "exercise_template_id": "D23C609B",
+                "weight_kg": 30.0,
+                "reps": 10,
+                "set_type": "normal"
+            }
+        ]
+    });
+    hevy.route_json("/v1/exercise_history/D23C609B", 200, &gravitron_history);
+
+    // Summary=true: top_set selected by least assistance weight, then most reps
+    let g_res_summary = mcp
+        .call_tool(
+            "get_exercise_history",
+            json!({"exercise_template_id": "D23C609B", "summary": true}),
+        )
+        .await;
+    assert!(!g_res_summary["isError"].as_bool().unwrap_or(false));
+    let g_payload_summary = tool_json(&g_res_summary);
+    let gw1 = &g_payload_summary["workouts"][0];
+    assert_eq!(gw1["top_set"], json!({"weight_kg": 30.0, "reps": 10}));
+    assert!(gw1.get("volume_kg").is_none(), "gravitron should have no volume_kg in summary");
+    assert!(gw1.get("estimated_1rm").is_none(), "gravitron should have no estimated_1rm in summary");
+
+    // Summary=false: volume_kg and estimated_1rm must NOT be present
+    let g_res_detail = mcp
+        .call_tool(
+            "get_exercise_history",
+            json!({"exercise_template_id": "D23C609B", "summary": false}),
+        )
+        .await;
+    assert!(!g_res_detail["isError"].as_bool().unwrap_or(false));
+    let g_payload_detail = tool_json(&g_res_detail);
+    let gw1_detail = &g_payload_detail["workouts"][0];
+    assert!(gw1_detail.get("volume_kg").is_none(), "gravitron should have no volume_kg when summary=false");
+    assert!(gw1_detail.get("estimated_1rm").is_none(), "gravitron should have no estimated_1rm when summary=false");
+    assert_eq!(gw1_detail["sets"].as_array().map(Vec::len), Some(3));
+
+    // get_exercise_template unwraps and caches wrapped template correctly
+    let tmpl_call = mcp.call_tool("get_exercise_template", json!({"template_id": "D23C609B"})).await;
+    assert!(!tmpl_call["isError"].as_bool().unwrap_or(false));
 }
 
 #[tokio::test]

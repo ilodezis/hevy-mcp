@@ -376,13 +376,23 @@ impl HevyMcp {
                 let id = a.str("template_id");
                 match hevy.get_exercise_template(id).await {
                     Ok(mut val) => {
-                        if let (Some(id_str), Some(ty)) = (val.get("id").and_then(Value::as_str), val.get("type").and_then(Value::as_str)) {
+                        let tmpl = val.get("exercise_template").unwrap_or(&val);
+                        if let (Some(id_str), Some(ty)) = (
+                            tmpl.get("id").and_then(Value::as_str),
+                            tmpl.get("type").or_else(|| tmpl.get("exercise_type")).and_then(Value::as_str),
+                        ) {
                             EXERCISE_TYPES.lock().await.insert(id_str.to_string(), ty.to_string());
                         }
                         let title_ru = cached_title_ru(id).await;
                         if let Some(map) = val.as_object_mut() {
                             map.remove("thumbnail_url");
-                            if let Some(ru) = title_ru {
+                            if let Some(ru) = &title_ru {
+                                map.insert("title_ru".to_string(), json!(ru));
+                            }
+                        }
+                        if let Some(map) = val.get_mut("exercise_template").and_then(Value::as_object_mut) {
+                            map.remove("thumbnail_url");
+                            if let Some(ru) = &title_ru {
                                 map.insert("title_ru".to_string(), json!(ru));
                             }
                         }
@@ -397,11 +407,15 @@ impl HevyMcp {
             "get_exercise_history" => {
                 let id = a.str("exercise_template_id");
                 let summary = a.0.get("summary").and_then(Value::as_bool).unwrap_or(false);
-                let is_assisted = if summary { self.is_assisted(id).await } else { false };
+                let is_assisted = self.is_assisted(id).await;
                 match hevy.get_exercise_history(id, a.opt_str("start_date"), a.opt_str("end_date")).await {
                     Ok(val) => {
                         let is_ass = is_assisted
-                            || val.get("exercise_type").or_else(|| val.get("type")).and_then(Value::as_str) == Some("bodyweight_assisted_reps");
+                            || val.get("exercise_type")
+                                .or_else(|| val.get("type"))
+                                .and_then(Value::as_str)
+                                .map(is_assisted_type)
+                                .unwrap_or(false);
                         dict(Ok(format_exercise_history(id, val, summary, is_ass)))
                     }
                     Err(HevyError::Api { status: 404, .. }) => {
@@ -623,22 +637,31 @@ impl HevyMcp {
         {
             let cache = EXERCISE_TYPES.lock().await;
             if let Some(t) = cache.get(template_id) {
-                return t == "bodyweight_assisted_reps";
+                return is_assisted_type(t);
             }
         }
-        if let Ok(tmpl) = self.hevy.get_exercise_template(template_id).await {
+        if let Ok(resp) = self.hevy.get_exercise_template(template_id).await {
+            let tmpl = resp.get("exercise_template").unwrap_or(&resp);
             let ty = tmpl
                 .get("type")
                 .or_else(|| tmpl.get("exercise_type"))
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let assisted = ty == "bodyweight_assisted_reps";
+            let assisted = is_assisted_type(&ty);
             EXERCISE_TYPES.lock().await.insert(template_id.to_string(), ty);
             return assisted;
         }
         false
     }
+}
+
+fn is_assisted_type(ty: &str) -> bool {
+    let t = ty.to_ascii_lowercase();
+    t == "bodyweight_assisted_reps"
+        || t == "bodyweight_assisted"
+        || t.starts_with("bodyweight_assisted")
+        || t.contains("assisted")
 }
 
 static EXERCISE_TYPES: LazyLock<tokio::sync::Mutex<HashMap<String, String>>> =
@@ -835,7 +858,12 @@ impl HevyMcp {
                     ex_names.push(json!(t));
                 }
                 let t_id = e.get("exercise_template_id").and_then(Value::as_str).unwrap_or_default();
-                let is_assisted = e.get("type").or_else(|| e.get("exercise_type")).and_then(Value::as_str) == Some("bodyweight_assisted_reps")
+                let is_assisted = e
+                    .get("type")
+                    .or_else(|| e.get("exercise_type"))
+                    .and_then(Value::as_str)
+                    .map(is_assisted_type)
+                    .unwrap_or(false)
                     || self.is_assisted(t_id).await;
                 if !is_assisted {
                     if let Some(sets) = e.get("sets").and_then(Value::as_array) {
@@ -991,6 +1019,12 @@ fn format_exercise_history(template_id: &str, val: Value, summary: bool, is_assi
                 if !is_assisted {
                     w["volume_kg"] = json!((volume * 100.0).round() / 100.0);
                     w["estimated_1rm"] = json!((best_e1rm * 10.0).round() / 10.0);
+                }
+            }
+            if is_assisted {
+                if let Some(map) = w.as_object_mut() {
+                    map.remove("volume_kg");
+                    map.remove("estimated_1rm");
                 }
             }
             workouts_list.push(w);
