@@ -1,6 +1,10 @@
 services:
   hevy_mcp:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: hevy_mcp
     # Bind-mount .env so every process start reads it fresh (no env_file
     # snapshot that would shadow live edits).

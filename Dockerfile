@@ -3,12 +3,15 @@
 FROM rust:1.97-alpine AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY templates ./templates
 # Build memory peaks at ~1 GB with 4 jobs and ~650 MB with 1 (the final LTO
 # step); lower it on a small VPS.
 ARG CARGO_BUILD_JOBS=4
+# Shown in serverInfo.version; deploy.sh passes the real values, local builds keep the defaults.
+ARG GIT_SHA=dev
+ARG BUILD_DATE=unknown
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked --jobs "$CARGO_BUILD_JOBS" \

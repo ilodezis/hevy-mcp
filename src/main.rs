@@ -15,6 +15,7 @@ mod signing;
 mod templates;
 mod urlenc;
 mod validate;
+mod version;
 mod web;
 
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};

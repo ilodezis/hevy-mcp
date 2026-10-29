@@ -380,6 +380,11 @@ impl<'a> Mcp<'a> {
             .await;
         assert_eq!(init.status, 200, "{}", init.body);
         assert_eq!(init.rpc_payload()["result"]["serverInfo"]["name"], "Hevy");
+        let version = init.rpc_payload()["result"]["serverInfo"]["version"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(version.starts_with("0.1.0 (Rust "), "{version}");
         let session = init.header("mcp-session-id").to_string();
         assert!(!session.is_empty(), "initialize returned no mcp-session-id");
         self.set("mcp-session-id", &session);

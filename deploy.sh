@@ -9,6 +9,8 @@ cd "$(dirname "$0")"
 git fetch origin
 PREV=$(git rev-parse HEAD)
 git reset --hard origin/master
+export GIT_SHA=$(git rev-parse --short HEAD)
+export BUILD_DATE=$(date -u +%Y-%m-%d)
 docker compose up -d --build
 
 healthy=0
@@ -23,6 +25,8 @@ done
 if [ "$healthy" -ne 1 ]; then
   echo "ROLLBACK: hevy-mcp unhealthy after deploy — rolling back to $PREV" >&2
   git reset --hard "$PREV"
+  export GIT_SHA=$(git rev-parse --short HEAD)
+  export BUILD_DATE=$(date -u +%Y-%m-%d)
   docker compose up -d --build
   echo "ROLLBACK COMPLETE: restored $PREV" >&2
   exit 1

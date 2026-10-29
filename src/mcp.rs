@@ -39,13 +39,14 @@ use serde_json::{Map, Value, json};
 use crate::{
     hevy::{HevyClient, HevyError, HevyResult},
     validate::{Validated, validate_call},
+    version,
 };
 
 static TOOLS: LazyLock<Vec<Tool>> =
     LazyLock::new(|| serde_json::from_str(include_str!("tools.json")).expect("valid tools.json"));
 
 fn server_info() -> Implementation {
-    Implementation::new("Hevy", env!("CARGO_PKG_VERSION"))
+    Implementation::new("Hevy", version::server_version())
 }
 
 #[derive(Clone)]
