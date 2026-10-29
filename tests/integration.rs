@@ -1048,3 +1048,161 @@ async fn test_error_handling_and_404_conventions() {
     let err_payload = tool_json(&get_res);
     assert_eq!(err_payload["error"], "workout 00000000-0000 not found");
 }
+
+#[tokio::test]
+async fn test_exercise_history_grouping_and_null_stripping() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    let flat_history = json!({
+        "exercise_history": [
+            {
+                "workout_id": "w1",
+                "workout_title": "Chest Day",
+                "workout_start_time": "2026-08-01T10:00:00+00:00",
+                "workout_end_time": "2026-08-01T11:00:00Z",
+                "exercise_template_id": "7EB3F7C3",
+                "weight_kg": 60.0,
+                "reps": 10,
+                "set_type": "normal",
+                "distance_meters": null,
+                "duration_seconds": null,
+                "rpe": null,
+                "custom_metric": null
+            },
+            {
+                "workout_id": "w1",
+                "workout_title": "Chest Day",
+                "workout_start_time": "2026-08-01T10:00:00+00:00",
+                "workout_end_time": "2026-08-01T11:00:00Z",
+                "exercise_template_id": "7EB3F7C3",
+                "weight_kg": 65.0,
+                "reps": 8,
+                "set_type": "normal",
+                "distance_meters": null,
+                "duration_seconds": null,
+                "rpe": 8.5,
+                "custom_metric": null
+            }
+        ]
+    });
+
+    // 1. Regular grouping (sets have set_index, null fields are stripped)
+    hevy.reply_json(200, &flat_history);
+    let res = mcp.call_tool("get_exercise_history", json!({"exercise_template_id": "7EB3F7C3"})).await;
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    let payload = tool_json(&res);
+    assert_eq!(payload["common"]["exercise_template_id"], "7EB3F7C3");
+    let workouts = payload["workouts"].as_array().expect("workouts array");
+    assert_eq!(workouts.len(), 1);
+    let w1 = &workouts[0];
+    assert_eq!(w1["workout_id"], "w1");
+    let sets = w1["sets"].as_array().expect("sets array");
+    assert_eq!(sets.len(), 2);
+    assert_eq!(sets[0]["set_index"], 1);
+    assert_eq!(sets[0]["weight_kg"], 60.0);
+    assert!(sets[0].get("distance_meters").is_none(), "null fields must be stripped");
+    assert_eq!(sets[1]["set_index"], 2);
+    assert_eq!(sets[1]["rpe"], 8.5);
+
+    // 2. Summary mode (top_set, volume_kg, estimated_1rm calculated)
+    hevy.reply_json(200, &flat_history);
+    let sum_res = mcp
+        .call_tool(
+            "get_exercise_history",
+            json!({"exercise_template_id": "7EB3F7C3", "summary": true}),
+        )
+        .await;
+    assert!(!sum_res["isError"].as_bool().unwrap_or(false));
+    let sum_payload = tool_json(&sum_res);
+    let sum_w1 = &sum_payload["workouts"][0];
+    assert_eq!(sum_w1["top_set"], json!({"weight_kg": 65.0, "reps": 8}));
+    assert_eq!(sum_w1["volume_kg"], json!(1120.0));
+    assert_eq!(sum_w1["estimated_1rm"], json!(82.3));
+}
+
+#[tokio::test]
+async fn test_list_workouts_and_routines_summary_mode() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    let raw_workouts = json!({
+        "page": 1,
+        "page_count": 1,
+        "workouts": [
+            {
+                "id": "w1",
+                "title": "Chest & Triceps",
+                "start_time": "2026-08-04T13:33:10+00:00",
+                "end_time": "2026-08-04T14:28:51.015Z",
+                "exercises": [
+                    {
+                        "title": "Chest Press (Machine)",
+                        "sets": [
+                            {"weight_kg": 60.0, "reps": 10, "distance_meters": null},
+                            {"weight_kg": 65.0, "reps": 8, "distance_meters": null}
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+
+    // 1. Default summary mode returns compact workout representation
+    hevy.reply_json(200, &raw_workouts);
+    let res = mcp.call_tool("list_workouts", json!({})).await;
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    let payload = tool_json(&res);
+    let w1 = &payload["workouts"][0];
+    assert_eq!(w1["id"], "w1");
+    assert_eq!(w1["title"], "Chest & Triceps");
+    assert_eq!(w1["start_time"], "2026-08-04T13:33:10Z");
+    assert_eq!(w1["start_time_local"], "2026-08-04T16:33:10+03:00");
+    assert_eq!(w1["duration_min"], 55);
+    assert_eq!(w1["exercises_count"], 1);
+    assert_eq!(w1["volume_kg"], 1120.0);
+    assert_eq!(w1["exercises"], json!(["Chest Press (Machine)"]));
+    assert!(w1.get("sets").is_none(), "summary mode omits detailed sets");
+
+    // 2. Full mode returns complete workout tree
+    hevy.reply_json(200, &raw_workouts);
+    let full_res = mcp.call_tool("list_workouts", json!({"detail": "full"})).await;
+    assert!(!full_res["isError"].as_bool().unwrap_or(false));
+    let full_payload = tool_json(&full_res);
+    let full_w1 = &full_payload["workouts"][0];
+    assert!(full_w1.get("exercises").is_some());
+    assert!(full_w1["exercises"][0].get("sets").is_some());
+
+    // 3. Routines summary mode
+    let raw_routines = json!({
+        "page": 1,
+        "page_count": 1,
+        "routines": [
+            {
+                "id": "r1",
+                "title": "Push Day",
+                "folder_id": 1,
+                "updated_at": "2026-08-04T10:00:00.000Z",
+                "exercises": [
+                    {
+                        "title": "Bench Press",
+                        "sets": [{"weight_kg": 80.0, "reps": 5}]
+                    }
+                ]
+            }
+        ]
+    });
+    hevy.reply_json(200, &raw_routines);
+    let r_res = mcp.call_tool("list_routines", json!({})).await;
+    assert!(!r_res["isError"].as_bool().unwrap_or(false));
+    let r_payload = tool_json(&r_res);
+    let r1 = &r_payload["routines"][0];
+    assert_eq!(r1["id"], "r1");
+    assert_eq!(r1["title"], "Push Day");
+    assert_eq!(r1["exercises"], json!(["Bench Press"]));
+    assert_eq!(r1["updated_at"], "2026-08-04T10:00:00Z");
+}
