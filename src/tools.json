@@ -438,7 +438,8 @@
              "type": "null"
             }
            ],
-           "default": null
+           "default": null,
+           "description": "Optional metric value for exercises tracking specialized units"
           }
          },
          "type": "object"
@@ -628,7 +629,8 @@
              "type": "null"
             }
            ],
-           "default": null
+           "default": null,
+           "description": "Optional metric value for exercises tracking specialized units"
           }
          },
          "type": "object"
@@ -836,7 +838,8 @@
              "type": "null"
             }
            ],
-           "default": null
+           "default": null,
+           "description": "Optional metric value for exercises tracking specialized units"
           }
          },
          "type": "object"
@@ -1027,7 +1030,8 @@
              "type": "null"
             }
            ],
-           "default": null
+           "default": null,
+           "description": "Optional metric value for exercises tracking specialized units"
           }
          },
          "type": "object"
