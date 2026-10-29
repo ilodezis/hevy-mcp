@@ -933,3 +933,69 @@ async fn test_update_workout_safe_defaults() {
     assert_eq!(sent_workout["title"], json!("Updated Leg Day"));
 }
 
+#[tokio::test]
+async fn test_search_exercise_templates_russian_and_empty() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // Upstream library with Chest Press (Machine)
+    let templates = json!({
+        "page_count": 1,
+        "exercise_templates": [
+            {
+                "id": "7EB3F7C3",
+                "title": "Chest Press (Machine)",
+                "type": "weight_reps",
+                "primary_muscle_group": "chest",
+                "equipment": "machine",
+                "is_custom": false
+            },
+            {
+                "id": "other_1",
+                "title": "Bicep Curl",
+                "type": "weight_reps",
+                "primary_muscle_group": "biceps",
+                "equipment": "dumbbell",
+                "is_custom": false
+            }
+        ]
+    });
+    hevy.reply_json(200, &templates);
+
+    // 1. Search with Russian term "жим"
+    let res = mcp.call_tool("search_exercise_templates", json!({"query": "жим"})).await;
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    let items = tool_json(&res);
+    let items_arr = items.as_array().expect("array of results");
+    assert_eq!(items_arr.len(), 1);
+    assert_eq!(items_arr[0]["id"], "7EB3F7C3");
+    assert_eq!(items_arr[0]["title"], "Chest Press (Machine)");
+    assert_eq!(items_arr[0]["title_ru"], "Жим от груди (Тренажёр)");
+
+    // 2. Search for non-matching term returns empty array [] (not error object)
+    hevy.reply_json(200, &templates);
+    let empty_res = mcp.call_tool("search_exercise_templates", json!({"query": "nonexistent_query"})).await;
+    assert!(!empty_res["isError"].as_bool().unwrap_or(false));
+    let empty_items = tool_json(&empty_res);
+    assert_eq!(empty_items, json!([]));
+
+    // 3. get_exercise_template returns title_ru and strips thumbnail_url
+    let single_template = json!({
+        "id": "7EB3F7C3",
+        "title": "Chest Press (Machine)",
+        "type": "weight_reps",
+        "primary_muscle_group": "chest",
+        "equipment": "machine",
+        "thumbnail_url": "https://pump-app.s3.eu-west-2.amazonaws.com/exercise-thumbnails/05771201.jpg"
+    });
+    hevy.reply_json(200, &single_template);
+    let tmpl_res = mcp.call_tool("get_exercise_template", json!({"template_id": "7EB3F7C3"})).await;
+    assert!(!tmpl_res["isError"].as_bool().unwrap_or(false));
+    let tmpl_json = tool_json(&tmpl_res);
+    assert_eq!(tmpl_json["title_ru"], "Жим от груди (Тренажёр)");
+    assert!(tmpl_json.get("thumbnail_url").is_none(), "thumbnail_url should be removed");
+}
+
+

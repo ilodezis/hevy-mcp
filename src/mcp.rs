@@ -245,7 +245,17 @@ impl HevyMcp {
             "search_exercise_templates" => {
                 Outcome::List(self.search_exercise_templates(a.str("query"), a.int("limit")).await)
             }
-            "get_exercise_template" => dict(hevy.get_exercise_template(a.str("template_id")).await),
+            "get_exercise_template" => {
+                let id = a.str("template_id");
+                let mut res = hevy.get_exercise_template(id).await;
+                if let Ok(Value::Object(ref mut map)) = res {
+                    map.remove("thumbnail_url");
+                    if let Some(ru) = find_title_ru(id) {
+                        map.insert("title_ru".to_string(), json!(ru));
+                    }
+                }
+                dict(res)
+            }
             "get_exercise_history" => dict(
                 hevy.get_exercise_history(
                     a.str("exercise_template_id"),
@@ -363,8 +373,8 @@ impl HevyMcp {
         }
     }
 
-    /// Find exercise templates by title substring (case-insensitive), scanning
-    /// up to 10 pages × 100 templates (default library + custom ones).
+    /// Find exercise templates by title substring (case-insensitive in English or Russian),
+    /// scanning up to 10 pages × 100 templates (default library + custom ones).
     async fn search_exercise_templates(&self, query: &str, limit: i64) -> Vec<Value> {
         let needle = query.trim().to_lowercase();
         let mut results: Vec<Value> = Vec::new();
@@ -379,17 +389,29 @@ impl HevyMcp {
                 .cloned()
                 .unwrap_or_default();
             for t in &batch {
+                let id = t.get("id").and_then(Value::as_str).unwrap_or_default();
                 let title = t.get("title").and_then(Value::as_str).unwrap_or_default();
-                if title.to_lowercase().contains(&needle) {
+                let title_ru = find_title_ru(id);
+                let ru_keywords = ru_keywords_for_en(title);
+
+                let matches_en = title.to_lowercase().contains(&needle);
+                let matches_ru_alias = title_ru.map(|r| r.to_lowercase().contains(&needle)).unwrap_or(false);
+                let matches_ru_kw = ru_keywords.iter().any(|&kw| needle.contains(kw) || kw.contains(&needle));
+
+                if matches_en || matches_ru_alias || matches_ru_kw {
                     let field = |k: &str| t.get(k).cloned().unwrap_or(Value::Null);
-                    results.push(json!({
+                    let mut entry = json!({
                         "id": field("id"),
                         "title": title,
                         "type": field("type"),
                         "primary_muscle_group": field("primary_muscle_group"),
                         "equipment": field("equipment"),
                         "is_custom": field("is_custom"),
-                    }));
+                    });
+                    if let Some(ru) = title_ru {
+                        entry["title_ru"] = json!(ru);
+                    }
+                    results.push(entry);
                     if results.len() as i64 >= limit {
                         return results;
                     }
@@ -400,9 +422,61 @@ impl HevyMcp {
                 break;
             }
         }
-        if results.is_empty() {
-            return vec![json!({"error": format!("No exercise templates matched '{query}'.")})];
-        }
         results
+    }
+}
+
+struct ExerciseAlias {
+    id: &'static str,
+    title_ru: &'static str,
+}
+
+static KNOWN_EXERCISES: &[ExerciseAlias] = &[
+    ExerciseAlias { id: "7EB3F7C3", title_ru: "Жим от груди (Тренажёр)" },
+    ExerciseAlias { id: "0EB695C9", title_ru: "Горизонтальный жим ногами (Тренажёр)" },
+    ExerciseAlias { id: "0EB695CA", title_ru: "Жим ногами (Тренажёр)" },
+    ExerciseAlias { id: "D05F25F4", title_ru: "Жим лёжа (Штанга)" },
+    ExerciseAlias { id: "4B1E94D8", title_ru: "Жим лёжа на наклонной скамье (Штанга)" },
+    ExerciseAlias { id: "B42CEBF6", title_ru: "Жим лёжа (Гантели)" },
+    ExerciseAlias { id: "3A29D843", title_ru: "Жим лёжа на наклонной скамье (Гантели)" },
+    ExerciseAlias { id: "5A8696F6", title_ru: "Армейский жим (Штанга)" },
+    ExerciseAlias { id: "E6BFB194", title_ru: "Жим сидя (Гантели)" },
+    ExerciseAlias { id: "397DE247", title_ru: "Приседания (Штанга)" },
+    ExerciseAlias { id: "4920CEB3", title_ru: "Становая тяга (Штанга)" },
+    ExerciseAlias { id: "5133BF9F", title_ru: "Румынская тяга (Штанга)" },
+    ExerciseAlias { id: "D9E6C3B7", title_ru: "Тяга верхнего блока" },
+    ExerciseAlias { id: "6DBC5A2F", title_ru: "Тяга горизонтального блока" },
+    ExerciseAlias { id: "98E56B12", title_ru: "Тяга штанги в наклоне" },
+    ExerciseAlias { id: "95DE73B1", title_ru: "Сгибание рук на бицепс (Гантели)" },
+    ExerciseAlias { id: "F8B12C45", title_ru: "Разгибание рук на трицепс" },
+    ExerciseAlias { id: "A1B2C3D4", title_ru: "Махи гантелями в стороны" },
+    ExerciseAlias { id: "B2C3D4E5", title_ru: "Разгибание ног в тренажёре" },
+    ExerciseAlias { id: "C3D4E5F6", title_ru: "Сгибание ног в тренажёре" },
+    ExerciseAlias { id: "D4E5F607", title_ru: "Подтягивания" },
+    ExerciseAlias { id: "E5F60718", title_ru: "Отжимания на брусьях" },
+];
+
+fn find_title_ru(id: &str) -> Option<&'static str> {
+    KNOWN_EXERCISES.iter().find(|e| e.id.eq_ignore_ascii_case(id)).map(|e| e.title_ru)
+}
+
+fn ru_keywords_for_en(en: &str) -> &'static [&'static str] {
+    let lower = en.to_lowercase();
+    if lower.contains("press") {
+        &["жим"]
+    } else if lower.contains("squat") {
+        &["присед", "приседания"]
+    } else if lower.contains("deadlift") || lower.contains("row") || lower.contains("pulldown") {
+        &["тяга"]
+    } else if lower.contains("curl") {
+        &["бицепс", "сгибание"]
+    } else if lower.contains("tricep") || lower.contains("extension") {
+        &["трицепс", "разгибание"]
+    } else if lower.contains("pull up") {
+        &["подтягивания"]
+    } else if lower.contains("dip") {
+        &["отжимания", "брусья"]
+    } else {
+        &[]
     }
 }

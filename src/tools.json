@@ -205,7 +205,7 @@
     "tags": []
    }
   },
-  "description": "Find exercise templates by title substring (case-insensitive).\n\nReturns a list of {id, title, type, primary_muscle_group, equipment, is_custom}.\nUse the ``id`` as ``exercise_template_id`` when building routines/workouts.\nScans up to ~1000 templates (default library + your custom ones).",
+  "description": "Find exercise templates by English or Russian title substring (case-insensitive, e.g. 'bench press' or 'жим лёжа', 'chest press' or 'жим от груди').\n\nReturns a list of {id, title, title_ru, type, primary_muscle_group, equipment, is_custom}.\nUse the ``id`` as ``exercise_template_id`` when building routines/workouts.\nScans up to ~1000 templates (default library + your custom ones).",
   "inputSchema": {
    "properties": {
     "query": {
