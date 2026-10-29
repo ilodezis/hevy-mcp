@@ -96,14 +96,14 @@ impl ServerHandler for HevyMcp {
 enum Outcome {
     Dict(Value),
     List(Vec<Value>),
-}
-
-fn err_dict(e: HevyError) -> Value {
-    json!({"error": e.to_string()})
+    Error(String),
 }
 
 fn dict(result: HevyResult) -> Outcome {
-    Outcome::Dict(result.unwrap_or_else(err_dict))
+    match result {
+        Ok(v) => Outcome::Dict(v),
+        Err(e) => Outcome::Error(e.to_string()),
+    }
 }
 
 fn text(value: &Value) -> ContentBlock {
@@ -124,7 +124,10 @@ fn list_result(items: Vec<Value>) -> CallToolResult {
 }
 
 fn error_result(message: String) -> CallToolResult {
-    CallToolResult::error(vec![ContentBlock::text(message)])
+    let err_json = json!({"error": message});
+    let mut result = CallToolResult::error(vec![text(&err_json)]);
+    result.structured_content = Some(err_json);
+    result
 }
 
 /// Read accessors over arguments the validator has already coerced.
@@ -209,6 +212,7 @@ impl HevyMcp {
         match self.dispatch(name, validated).await {
             Outcome::Dict(value) => dict_result(value),
             Outcome::List(items) => list_result(items),
+            Outcome::Error(msg) => error_result(msg),
         }
     }
 
@@ -233,37 +237,116 @@ impl HevyMcp {
         match name {
             // ── Read ────────────────────────────────────────────────────────
             "workout_count" => dict(hevy.workout_count().await.map(|n| json!({"workout_count": n}))),
-            "list_workouts" => dict(hevy.get_workouts(a.int("page"), a.int("page_size")).await),
-            "get_workout" => dict(hevy.get_workout(a.str("workout_id")).await),
-            "list_routines" => dict(hevy.get_routines(a.int("page"), a.int("page_size")).await),
-            "get_routine" => dict(hevy.get_routine(a.str("routine_id")).await),
-            "list_routine_folders" => {
-                dict(hevy.get_routine_folders(a.int("page"), a.int("page_size")).await)
+            "list_workouts" => {
+                match hevy.get_workouts(a.int("page"), a.int("page_size")).await {
+                    Ok(val) => dict(Ok(val)),
+                    Err(HevyError::Api { status: 404, .. }) => {
+                        dict(Ok(json!({
+                            "page": a.int("page"),
+                            "page_count": 0,
+                            "workouts": []
+                        })))
+                    }
+                    Err(e) => dict(Err(e)),
+                }
             }
-            "get_routine_folder" => dict(hevy.get_routine_folder(a.int("folder_id")).await),
+            "get_workout" => {
+                let id = a.str("workout_id");
+                match hevy.get_workout(id).await {
+                    Ok(val) => dict(Ok(val)),
+                    Err(HevyError::Api { status: 404, .. }) => {
+                        Outcome::Error(format!("workout {id} not found"))
+                    }
+                    Err(e) => dict(Err(e)),
+                }
+            }
+            "list_routines" => {
+                match hevy.get_routines(a.int("page"), a.int("page_size")).await {
+                    Ok(val) => dict(Ok(val)),
+                    Err(HevyError::Api { status: 404, .. }) => {
+                        dict(Ok(json!({
+                            "page": a.int("page"),
+                            "page_count": 0,
+                            "routines": []
+                        })))
+                    }
+                    Err(e) => dict(Err(e)),
+                }
+            }
+            "get_routine" => {
+                let id = a.str("routine_id");
+                match hevy.get_routine(id).await {
+                    Ok(val) => dict(Ok(val)),
+                    Err(HevyError::Api { status: 404, .. }) => {
+                        Outcome::Error(format!("routine {id} not found"))
+                    }
+                    Err(e) => dict(Err(e)),
+                }
+            }
+            "list_routine_folders" => {
+                match hevy.get_routine_folders(a.int("page"), a.int("page_size")).await {
+                    Ok(mut envelope) => {
+                        if let Some(map) = envelope.as_object_mut() {
+                            if map.contains_key("routines") && !map.contains_key("routine_folders") {
+                                if let Some(routines) = map.remove("routines") {
+                                    map.insert("routine_folders".to_string(), routines);
+                                }
+                            }
+                        }
+                        dict(Ok(envelope))
+                    }
+                    Err(HevyError::Api { status: 404, .. }) => {
+                        dict(Ok(json!({
+                            "page": a.int("page"),
+                            "page_count": 0,
+                            "routine_folders": []
+                        })))
+                    }
+                    Err(e) => dict(Err(e)),
+                }
+            }
+            "get_routine_folder" => {
+                let id = a.int("folder_id");
+                match hevy.get_routine_folder(id).await {
+                    Ok(val) => dict(Ok(val)),
+                    Err(HevyError::Api { status: 404, .. }) => {
+                        Outcome::Error(format!("routine folder {id} not found"))
+                    }
+                    Err(e) => dict(Err(e)),
+                }
+            }
             "get_user_info" => dict(hevy.get_user_info().await),
             "search_exercise_templates" => {
                 Outcome::List(self.search_exercise_templates(a.str("query"), a.int("limit")).await)
             }
             "get_exercise_template" => {
                 let id = a.str("template_id");
-                let mut res = hevy.get_exercise_template(id).await;
-                if let Ok(Value::Object(ref mut map)) = res {
-                    map.remove("thumbnail_url");
-                    if let Some(ru) = find_title_ru(id) {
-                        map.insert("title_ru".to_string(), json!(ru));
+                match hevy.get_exercise_template(id).await {
+                    Ok(mut val) => {
+                        if let Some(map) = val.as_object_mut() {
+                            map.remove("thumbnail_url");
+                            if let Some(ru) = find_title_ru(id) {
+                                map.insert("title_ru".to_string(), json!(ru));
+                            }
+                        }
+                        dict(Ok(val))
                     }
+                    Err(HevyError::Api { status: 404, .. }) => {
+                        Outcome::Error(format!("exercise template {id} not found"))
+                    }
+                    Err(e) => dict(Err(e)),
                 }
-                dict(res)
             }
-            "get_exercise_history" => dict(
-                hevy.get_exercise_history(
-                    a.str("exercise_template_id"),
-                    a.opt_str("start_date"),
-                    a.opt_str("end_date"),
-                )
-                .await,
-            ),
+            "get_exercise_history" => {
+                let id = a.str("exercise_template_id");
+                match hevy.get_exercise_history(id, a.opt_str("start_date"), a.opt_str("end_date")).await {
+                    Ok(val) => dict(Ok(val)),
+                    Err(HevyError::Api { status: 404, .. }) => {
+                        Outcome::Error(format!("exercise template {id} not found"))
+                    }
+                    Err(e) => dict(Err(e)),
+                }
+            }
             // ── Write ───────────────────────────────────────────────────────
             "create_routine" => {
                 let routine = json!({
@@ -289,7 +372,7 @@ impl HevyMcp {
                                     let cur_r = current.get("routine").unwrap_or(&current);
                                     cur_r.get("notes").cloned().unwrap_or(Value::Null)
                                 }
-                                Err(e) => return Outcome::Dict(err_dict(e)),
+                                Err(e) => return Outcome::Error(format!("workout {id} not found: {e}")),
                             },
                         };
                         let routine = json!({
@@ -340,7 +423,7 @@ impl HevyMcp {
                                     };
                                     (p, d)
                                 }
-                                Err(e) => return Outcome::Dict(err_dict(e)),
+                                Err(e) => return Outcome::Error(format!("workout {id} not found: {e}")),
                             }
                         };
                         let workout = json!({
@@ -381,7 +464,7 @@ impl HevyMcp {
         for page in 1..=10 {
             let envelope = match self.hevy.get_exercise_templates(page, 100).await {
                 Ok(envelope) => envelope,
-                Err(e) => return vec![err_dict(e)],
+                Err(_) => return vec![],
             };
             let batch = envelope
                 .get("exercise_templates")

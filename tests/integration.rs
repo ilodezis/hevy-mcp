@@ -998,4 +998,53 @@ async fn test_search_exercise_templates_russian_and_empty() {
     assert!(tmpl_json.get("thumbnail_url").is_none(), "thumbnail_url should be removed");
 }
 
+#[tokio::test]
+async fn test_routine_folders_normalizes_routines_key() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
 
+    // Upstream Hevy returns 'routines' key instead of 'routine_folders'
+    hevy.reply_json(
+        200,
+        &json!({
+            "page": 1,
+            "page_count": 1,
+            "routines": [{"id": 10, "title": "Push / Pull / Legs"}]
+        }),
+    );
+
+    let res = mcp.call_tool("list_routine_folders", json!({})).await;
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    let payload = tool_json(&res);
+    assert!(payload.get("routines").is_none(), "Key 'routines' must be normalized");
+    assert_eq!(
+        payload["routine_folders"],
+        json!([{"id": 10, "title": "Push / Pull / Legs"}])
+    );
+}
+
+#[tokio::test]
+async fn test_error_handling_and_404_conventions() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // 1. Paginated out-of-bounds page returns empty list with page_count (not error)
+    hevy.reply_text(404, "{"error": "Page not found"}");
+    let list_res = mcp.call_tool("list_workouts", json!({"page": 99})).await;
+    assert!(!list_res["isError"].as_bool().unwrap_or(false));
+    let list_payload = tool_json(&list_res);
+    assert_eq!(list_payload["page"], 99);
+    assert_eq!(list_payload["page_count"], 0);
+    assert_eq!(list_payload["workouts"], json!([]));
+
+    // 2. Entity lookup 404 returns MCP isError: true with clean message
+    hevy.reply_text(404, "Workout not found");
+    let get_res = mcp.call_tool("get_workout", json!({"workout_id": "00000000-0000"})).await;
+    assert_eq!(get_res["isError"], true);
+    let err_payload = tool_json(&get_res);
+    assert_eq!(err_payload["error"], "workout 00000000-0000 not found");
+}
