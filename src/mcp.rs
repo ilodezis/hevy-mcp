@@ -2,8 +2,9 @@
 //!
 //! Conventions (a stable contract the model can rely on):
 //!   * Success — the tool's normal payload (a dict, or a list of dicts).
-//!   * A recoverable problem (bad id, not configured, Hevy 4xx) — a dict
-//!     `{"error": "<human message>"}`.
+//!   * A recoverable problem (bad id, not configured, Hevy 4xx) — an MCP
+//!     error result (`isError: true`) carrying `{"error": "<human message>"}`.
+//!     "Nothing found" is an empty list, not an error.
 //!
 //! The tool definitions in `tools.json` define the `tools/list` entries
 //! (names, titles, descriptions, input and output schemas), and results are
@@ -18,7 +19,11 @@
 //! for the id, then `get_exercise_history` — not `list_workouts`, which pages
 //! ten workouts at a time.
 
-use std::sync::{Arc, LazyLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+    time::{Duration, Instant},
+};
 
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -331,15 +336,19 @@ impl HevyMcp {
                 }
             }
             "search_exercise_templates" => {
-                Outcome::List(self.search_exercise_templates(a.str("query"), a.int("limit")).await)
+                match self.search_exercise_templates(a.str("query"), a.int("limit")).await {
+                    Ok(items) => Outcome::List(items),
+                    Err(e) => Outcome::Error(e.to_string()),
+                }
             }
             "get_exercise_template" => {
                 let id = a.str("template_id");
                 match hevy.get_exercise_template(id).await {
                     Ok(mut val) => {
+                        let title_ru = cached_title_ru(id).await;
                         if let Some(map) = val.as_object_mut() {
                             map.remove("thumbnail_url");
-                            if let Some(ru) = find_title_ru(id) {
+                            if let Some(ru) = title_ru {
                                 map.insert("title_ru".to_string(), json!(ru));
                             }
                         }
@@ -387,7 +396,10 @@ impl HevyMcp {
                                     let cur_r = current.get("routine").unwrap_or(&current);
                                     cur_r.get("notes").cloned().unwrap_or(Value::Null)
                                 }
-                                Err(e) => return Outcome::Error(format!("workout {id} not found: {e}")),
+                                Err(HevyError::Api { status: 404, .. }) => {
+                                    return Outcome::Error(format!("routine {id} not found"));
+                                }
+                                Err(e) => return Outcome::Error(e.to_string()),
                             },
                         };
                         let routine = json!({
@@ -438,7 +450,10 @@ impl HevyMcp {
                                     };
                                     (p, d)
                                 }
-                                Err(e) => return Outcome::Error(format!("workout {id} not found: {e}")),
+                                Err(HevyError::Api { status: 404, .. }) => {
+                                    return Outcome::Error(format!("workout {id} not found"));
+                                }
+                                Err(e) => return Outcome::Error(e.to_string()),
                             }
                         };
                         let workout = json!({
@@ -471,16 +486,20 @@ impl HevyMcp {
         }
     }
 
-    /// Find exercise templates by title substring (case-insensitive in English or Russian),
-    /// scanning up to 10 pages × 100 templates (default library + custom ones).
-    async fn search_exercise_templates(&self, query: &str, limit: i64) -> Vec<Value> {
-        let needle = query.trim().to_lowercase();
+    /// Find exercise templates by title substring, case-insensitive, scanning up
+    /// to 10 pages × 100 templates (default library + custom ones). The library
+    /// is English; a Cyrillic query is matched against the Russian titles the
+    /// user's own workouts carry (see `ru_titles`).
+    async fn search_exercise_templates(&self, query: &str, limit: i64) -> HevyResult<Vec<Value>> {
+        let needle = fold(query.trim());
+        let ru = if has_cyrillic(&needle) {
+            self.ru_titles().await?
+        } else {
+            RU_TITLES.lock().await.as_ref().map(|(_, m)| m.clone()).unwrap_or_default()
+        };
         let mut results: Vec<Value> = Vec::new();
         for page in 1..=10 {
-            let envelope = match self.hevy.get_exercise_templates(page, 100).await {
-                Ok(envelope) => envelope,
-                Err(_) => return vec![],
-            };
+            let envelope = self.hevy.get_exercise_templates(page, 100).await?;
             let batch = envelope
                 .get("exercise_templates")
                 .and_then(Value::as_array)
@@ -489,14 +508,9 @@ impl HevyMcp {
             for t in &batch {
                 let id = t.get("id").and_then(Value::as_str).unwrap_or_default();
                 let title = t.get("title").and_then(Value::as_str).unwrap_or_default();
-                let title_ru = find_title_ru(id);
-                let ru_keywords = ru_keywords_for_en(title);
-
-                let matches_en = title.to_lowercase().contains(&needle);
-                let matches_ru_alias = title_ru.map(|r| r.to_lowercase().contains(&needle)).unwrap_or(false);
-                let matches_ru_kw = ru_keywords.iter().any(|&kw| needle.contains(kw) || kw.contains(&needle));
-
-                if matches_en || matches_ru_alias || matches_ru_kw {
+                let title_ru = ru.get(id);
+                let matches = fold(title).contains(&needle) || title_ru.is_some_and(|r| fold(r).contains(&needle));
+                if matches {
                     let field = |k: &str| t.get(k).cloned().unwrap_or(Value::Null);
                     let mut entry = json!({
                         "id": field("id"),
@@ -511,7 +525,7 @@ impl HevyMcp {
                     }
                     results.push(entry);
                     if results.len() as i64 >= limit {
-                        return results;
+                        return Ok(results);
                     }
                 }
             }
@@ -520,63 +534,65 @@ impl HevyMcp {
                 break;
             }
         }
-        results
+        Ok(results)
+    }
+
+    /// `exercise_template_id → Russian title`, learnt from the most recent
+    /// workouts: the Hevy app logs exercises under the user's language while
+    /// the template library stays English. Newest title wins.
+    async fn ru_titles(&self) -> HevyResult<HashMap<String, String>> {
+        let mut cache = RU_TITLES.lock().await;
+        if let Some((built, map)) = cache.as_ref()
+            && built.elapsed() < RU_TITLES_TTL
+        {
+            return Ok(map.clone());
+        }
+        let mut map = HashMap::new();
+        for page in 1..=RU_TITLES_PAGES {
+            let envelope = match self.hevy.get_workouts(page, 10).await {
+                Ok(envelope) => envelope,
+                Err(HevyError::Api { status: 404, .. }) => break,
+                Err(e) => return Err(e),
+            };
+            let workouts = envelope.get("workouts").and_then(Value::as_array).cloned().unwrap_or_default();
+            for exercise in workouts.iter().filter_map(|w| w.get("exercises").and_then(Value::as_array)).flatten() {
+                let id = exercise.get("exercise_template_id").and_then(Value::as_str);
+                let title = exercise.get("title").and_then(Value::as_str);
+                if let (Some(id), Some(title)) = (id, title)
+                    && has_cyrillic(title)
+                {
+                    map.entry(id.to_string()).or_insert_with(|| title.to_string());
+                }
+            }
+            let page_count = envelope.get("page_count").and_then(Value::as_i64).unwrap_or(page);
+            if page >= page_count || workouts.is_empty() {
+                break;
+            }
+        }
+        *cache = Some((Instant::now(), map.clone()));
+        Ok(map)
     }
 }
 
-struct ExerciseAlias {
-    id: &'static str,
-    title_ru: &'static str,
+/// Process-wide: one server talks to one Hevy account.
+static RU_TITLES: LazyLock<tokio::sync::Mutex<Option<(Instant, HashMap<String, String>)>>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(None));
+const RU_TITLES_TTL: Duration = Duration::from_secs(6 * 3600);
+/// 10 pages × 10 workouts: the last ~100 sessions cover every exercise in use.
+const RU_TITLES_PAGES: i64 = 10;
+
+/// The Russian title already learnt for a template, without fetching anything.
+async fn cached_title_ru(id: &str) -> Option<String> {
+    RU_TITLES.lock().await.as_ref().and_then(|(_, m)| m.get(id).cloned())
 }
 
-static KNOWN_EXERCISES: &[ExerciseAlias] = &[
-    ExerciseAlias { id: "7EB3F7C3", title_ru: "Жим от груди (Тренажёр)" },
-    ExerciseAlias { id: "0EB695C9", title_ru: "Горизонтальный жим ногами (Тренажёр)" },
-    ExerciseAlias { id: "0EB695CA", title_ru: "Жим ногами (Тренажёр)" },
-    ExerciseAlias { id: "D05F25F4", title_ru: "Жим лёжа (Штанга)" },
-    ExerciseAlias { id: "4B1E94D8", title_ru: "Жим лёжа на наклонной скамье (Штанга)" },
-    ExerciseAlias { id: "B42CEBF6", title_ru: "Жим лёжа (Гантели)" },
-    ExerciseAlias { id: "3A29D843", title_ru: "Жим лёжа на наклонной скамье (Гантели)" },
-    ExerciseAlias { id: "5A8696F6", title_ru: "Армейский жим (Штанга)" },
-    ExerciseAlias { id: "E6BFB194", title_ru: "Жим сидя (Гантели)" },
-    ExerciseAlias { id: "397DE247", title_ru: "Приседания (Штанга)" },
-    ExerciseAlias { id: "4920CEB3", title_ru: "Становая тяга (Штанга)" },
-    ExerciseAlias { id: "5133BF9F", title_ru: "Румынская тяга (Штанга)" },
-    ExerciseAlias { id: "D9E6C3B7", title_ru: "Тяга верхнего блока" },
-    ExerciseAlias { id: "6DBC5A2F", title_ru: "Тяга горизонтального блока" },
-    ExerciseAlias { id: "98E56B12", title_ru: "Тяга штанги в наклоне" },
-    ExerciseAlias { id: "95DE73B1", title_ru: "Сгибание рук на бицепс (Гантели)" },
-    ExerciseAlias { id: "F8B12C45", title_ru: "Разгибание рук на трицепс" },
-    ExerciseAlias { id: "A1B2C3D4", title_ru: "Махи гантелями в стороны" },
-    ExerciseAlias { id: "B2C3D4E5", title_ru: "Разгибание ног в тренажёре" },
-    ExerciseAlias { id: "C3D4E5F6", title_ru: "Сгибание ног в тренажёре" },
-    ExerciseAlias { id: "D4E5F607", title_ru: "Подтягивания" },
-    ExerciseAlias { id: "E5F60718", title_ru: "Отжимания на брусьях" },
-];
-
-fn find_title_ru(id: &str) -> Option<&'static str> {
-    KNOWN_EXERCISES.iter().find(|e| e.id.eq_ignore_ascii_case(id)).map(|e| e.title_ru)
+fn has_cyrillic(s: &str) -> bool {
+    s.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))
 }
 
-fn ru_keywords_for_en(en: &str) -> &'static [&'static str] {
-    let lower = en.to_lowercase();
-    if lower.contains("press") {
-        &["жим"]
-    } else if lower.contains("squat") {
-        &["присед", "приседания"]
-    } else if lower.contains("deadlift") || lower.contains("row") || lower.contains("pulldown") {
-        &["тяга"]
-    } else if lower.contains("curl") {
-        &["бицепс", "сгибание"]
-    } else if lower.contains("tricep") || lower.contains("extension") {
-        &["трицепс", "разгибание"]
-    } else if lower.contains("pull up") {
-        &["подтягивания"]
-    } else if lower.contains("dip") {
-        &["отжимания", "брусья"]
-    } else {
-        &[]
-    }
+/// Lowercase with ё folded into е, so "лежа" finds "Жим лёжа".
+fn fold(s: &str) -> String {
+    s.to_lowercase().replace('ё', "е")
 }
 
 fn strip_nulls(value: Value) -> Value {

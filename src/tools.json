@@ -224,7 +224,7 @@
     "tags": []
    }
   },
-  "description": "Find exercise templates by English or Russian title substring (case-insensitive, e.g. 'bench press' or 'жим лёжа', 'chest press' or 'жим от груди').\n\nReturns a list of {id, title, title_ru, type, primary_muscle_group, equipment, is_custom}.\nUse the ``id`` as ``exercise_template_id`` when building routines/workouts.\nScans up to ~1000 templates (default library + your custom ones).",
+  "description": "Find exercise templates by title substring (case-insensitive, e.g. 'bench press' or 'жим лёжа').\n\nThe Hevy library is English. A Russian query matches the Russian titles of exercises you have already logged in workouts; an exercise you never did can only be found in English. Nothing matched is an empty list.\n\nReturns a list of {id, title, title_ru (when known), type, primary_muscle_group, equipment, is_custom}.\nUse the ``id`` as ``exercise_template_id`` when building routines/workouts.\nScans up to ~1000 templates (default library + your custom ones).",
   "inputSchema": {
    "properties": {
     "query": {

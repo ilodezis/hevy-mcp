@@ -940,9 +940,17 @@ async fn test_search_exercise_templates_russian_and_empty() {
     let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
     mcp.connect(false).await;
 
-    // Upstream library with Chest Press (Machine)
+    // The mock answers every path with this one body: the template library for
+    // /v1/exercise_templates, and a workout logged in Russian for /v1/workouts.
     let templates = json!({
         "page_count": 1,
+        "workouts": [{
+            "id": "w1",
+            "exercises": [
+                {"exercise_template_id": "7EB3F7C3", "title": "Жим от груди (Тренажёр)"},
+                {"exercise_template_id": "other_1", "title": "Bicep Curl"}
+            ]
+        }],
         "exercise_templates": [
             {
                 "id": "7EB3F7C3",
@@ -973,6 +981,15 @@ async fn test_search_exercise_templates_russian_and_empty() {
     assert_eq!(items_arr[0]["id"], "7EB3F7C3");
     assert_eq!(items_arr[0]["title"], "Chest Press (Machine)");
     assert_eq!(items_arr[0]["title_ru"], "Жим от груди (Тренажёр)");
+    assert!(hevy.take().iter().any(|s| s.path == "/v1/workouts"), "Russian titles come from logged workouts");
+
+    // 1b. ё and е are the same letter for the search
+    let res = mcp.call_tool("search_exercise_templates", json!({"query": "тренажер"})).await;
+    assert_eq!(tool_json(&res).as_array().expect("array").len(), 1);
+
+    // 1c. a Russian word matches only exercises logged under it, not every "press"
+    let res = mcp.call_tool("search_exercise_templates", json!({"query": "присед"})).await;
+    assert_eq!(tool_json(&res), json!([]));
 
     // 2. Search for non-matching term returns empty array [] (not error object)
     hevy.reply_json(200, &templates);
@@ -996,6 +1013,11 @@ async fn test_search_exercise_templates_russian_and_empty() {
     let tmpl_json = tool_json(&tmpl_res);
     assert_eq!(tmpl_json["title_ru"], "Жим от груди (Тренажёр)");
     assert!(tmpl_json.get("thumbnail_url").is_none(), "thumbnail_url should be removed");
+
+    // 4. an upstream failure is an MCP error, not "nothing found"
+    hevy.reply_text(401, "{\"error\": \"Invalid api key\"}");
+    let failed = mcp.call_tool("search_exercise_templates", json!({"query": "bench"})).await;
+    assert!(failed["isError"].as_bool().unwrap_or(false), "{failed}");
 }
 
 #[tokio::test]
