@@ -247,12 +247,22 @@ impl HevyMcp {
                 match hevy.get_workouts(a.int("page"), a.int("page_size")).await {
                     Ok(val) => {
                         let detail = a.opt_str("detail").unwrap_or("summary");
-                        dict(Ok(format_workouts_list(val, detail)))
+                        dict(Ok(self.format_workouts_list(val, detail).await))
                     }
                     Err(HevyError::Api { status: 404, .. }) => {
+                        let page = a.int("page");
+                        let page_size = a.int("page_size");
+                        let real_page_count = if page > 1 {
+                            match hevy.get_workouts(1, page_size).await {
+                                Ok(env) => env.get("page_count").and_then(Value::as_i64).unwrap_or(0),
+                                Err(_) => 0,
+                            }
+                        } else {
+                            0
+                        };
                         dict(Ok(json!({
-                            "page": a.int("page"),
-                            "page_count": 0,
+                            "page": page,
+                            "page_count": real_page_count,
                             "workouts": []
                         })))
                     }
@@ -276,9 +286,19 @@ impl HevyMcp {
                         dict(Ok(format_routines_list(val, detail)))
                     }
                     Err(HevyError::Api { status: 404, .. }) => {
+                        let page = a.int("page");
+                        let page_size = a.int("page_size");
+                        let real_page_count = if page > 1 {
+                            match hevy.get_routines(1, page_size).await {
+                                Ok(env) => env.get("page_count").and_then(Value::as_i64).unwrap_or(0),
+                                Err(_) => 0,
+                            }
+                        } else {
+                            0
+                        };
                         dict(Ok(json!({
-                            "page": a.int("page"),
-                            "page_count": 0,
+                            "page": page,
+                            "page_count": real_page_count,
                             "routines": []
                         })))
                     }
@@ -308,9 +328,19 @@ impl HevyMcp {
                         dict(Ok(envelope))
                     }
                     Err(HevyError::Api { status: 404, .. }) => {
+                        let page = a.int("page");
+                        let page_size = a.int("page_size");
+                        let real_page_count = if page > 1 {
+                            match hevy.get_routine_folders(1, page_size).await {
+                                Ok(env) => env.get("page_count").and_then(Value::as_i64).unwrap_or(0),
+                                Err(_) => 0,
+                            }
+                        } else {
+                            0
+                        };
                         dict(Ok(json!({
-                            "page": a.int("page"),
-                            "page_count": 0,
+                            "page": page,
+                            "page_count": real_page_count,
                             "routine_folders": []
                         })))
                     }
@@ -346,6 +376,9 @@ impl HevyMcp {
                 let id = a.str("template_id");
                 match hevy.get_exercise_template(id).await {
                     Ok(mut val) => {
+                        if let (Some(id_str), Some(ty)) = (val.get("id").and_then(Value::as_str), val.get("type").and_then(Value::as_str)) {
+                            EXERCISE_TYPES.lock().await.insert(id_str.to_string(), ty.to_string());
+                        }
                         let title_ru = cached_title_ru(id).await;
                         if let Some(map) = val.as_object_mut() {
                             map.remove("thumbnail_url");
@@ -364,8 +397,13 @@ impl HevyMcp {
             "get_exercise_history" => {
                 let id = a.str("exercise_template_id");
                 let summary = a.0.get("summary").and_then(Value::as_bool).unwrap_or(false);
+                let is_assisted = if summary { self.is_assisted(id).await } else { false };
                 match hevy.get_exercise_history(id, a.opt_str("start_date"), a.opt_str("end_date")).await {
-                    Ok(val) => dict(Ok(format_exercise_history(id, val, summary))),
+                    Ok(val) => {
+                        let is_ass = is_assisted
+                            || val.get("exercise_type").or_else(|| val.get("type")).and_then(Value::as_str) == Some("bodyweight_assisted_reps");
+                        dict(Ok(format_exercise_history(id, val, summary, is_ass)))
+                    }
                     Err(HevyError::Api { status: 404, .. }) => {
                         Outcome::Error(format!("exercise template {id} not found"))
                     }
@@ -513,10 +551,14 @@ impl HevyMcp {
                 let matches = fold(title).contains(&needle) || title_ru.is_some_and(|r| fold(r).contains(&needle));
                 if matches {
                     let field = |k: &str| t.get(k).cloned().unwrap_or(Value::Null);
+                    let ty_val = field("type");
+                    if let (Some(id_str), Some(ty_str)) = (t.get("id").and_then(Value::as_str), ty_val.as_str()) {
+                        EXERCISE_TYPES.lock().await.insert(id_str.to_string(), ty_str.to_string());
+                    }
                     let mut entry = json!({
                         "id": field("id"),
                         "title": title,
-                        "type": field("type"),
+                        "type": ty_val,
                         "primary_muscle_group": field("primary_muscle_group"),
                         "equipment": field("equipment"),
                         "is_custom": field("is_custom"),
@@ -573,7 +615,34 @@ impl HevyMcp {
         *cache = Some((Instant::now(), map.clone()));
         Ok(map)
     }
+
+    async fn is_assisted(&self, template_id: &str) -> bool {
+        if template_id.is_empty() {
+            return false;
+        }
+        {
+            let cache = EXERCISE_TYPES.lock().await;
+            if let Some(t) = cache.get(template_id) {
+                return t == "bodyweight_assisted_reps";
+            }
+        }
+        if let Ok(tmpl) = self.hevy.get_exercise_template(template_id).await {
+            let ty = tmpl
+                .get("type")
+                .or_else(|| tmpl.get("exercise_type"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let assisted = ty == "bodyweight_assisted_reps";
+            EXERCISE_TYPES.lock().await.insert(template_id.to_string(), ty);
+            return assisted;
+        }
+        false
+    }
 }
+
+static EXERCISE_TYPES: LazyLock<tokio::sync::Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 /// Process-wide: one server talks to one Hevy account.
 static RU_TITLES: LazyLock<tokio::sync::Mutex<Option<(Instant, HashMap<String, String>)>>> =
@@ -733,71 +802,78 @@ fn clean_workout(mut workout: Value) -> Value {
     strip_nulls(workout)
 }
 
-fn format_workouts_list(mut envelope: Value, detail: &str) -> Value {
-    let Some(workouts) = envelope.get_mut("workouts").and_then(Value::as_array_mut) else {
-        return strip_nulls(envelope);
-    };
-    if detail == "full" {
-        for w in workouts.iter_mut() {
-            if let Some(map) = w.as_object_mut() {
-                if let Some(s) = map.get("start_time").and_then(Value::as_str) {
-                    let norm = normalize_iso_timestamp(s);
-                    if let Some(loc) = to_local_moscow(&norm) {
-                        map.insert("start_time_local".to_string(), json!(loc));
+impl HevyMcp {
+    async fn format_workouts_list(&self, mut envelope: Value, detail: &str) -> Value {
+        let Some(workouts) = envelope.get_mut("workouts").and_then(Value::as_array_mut) else {
+            return strip_nulls(envelope);
+        };
+        if detail == "full" {
+            for w in workouts.iter_mut() {
+                if let Some(map) = w.as_object_mut() {
+                    if let Some(s) = map.get("start_time").and_then(Value::as_str) {
+                        let norm = normalize_iso_timestamp(s);
+                        if let Some(loc) = to_local_moscow(&norm) {
+                            map.insert("start_time_local".to_string(), json!(loc));
+                        }
+                        map.insert("start_time".to_string(), json!(norm));
                     }
-                    map.insert("start_time".to_string(), json!(norm));
-                }
-                if let Some(e) = map.get("end_time").and_then(Value::as_str) {
-                    map.insert("end_time".to_string(), json!(normalize_iso_timestamp(e)));
+                    if let Some(e) = map.get("end_time").and_then(Value::as_str) {
+                        map.insert("end_time".to_string(), json!(normalize_iso_timestamp(e)));
+                    }
                 }
             }
+            return strip_nulls(envelope);
         }
-        return strip_nulls(envelope);
-    }
-    let mut summary_workouts = Vec::with_capacity(workouts.len());
-    for w in workouts.iter() {
-        let empty_vec = Vec::new();
-        let ex_list = w.get("exercises").and_then(Value::as_array).unwrap_or(&empty_vec);
-        let mut ex_names = Vec::new();
-        let mut total_vol = 0.0;
-        for e in ex_list {
-            if let Some(t) = e.get("title").and_then(Value::as_str) {
-                ex_names.push(json!(t));
-            }
-            if let Some(sets) = e.get("sets").and_then(Value::as_array) {
-                for s in sets {
-                    let wt = s.get("weight_kg").and_then(Value::as_f64).unwrap_or(0.0);
-                    let r = s.get("reps").and_then(Value::as_i64).unwrap_or(0);
-                    total_vol += wt * (r as f64);
+        let mut summary_workouts = Vec::with_capacity(workouts.len());
+        for w in workouts.iter() {
+            let empty_vec = Vec::new();
+            let ex_list = w.get("exercises").and_then(Value::as_array).unwrap_or(&empty_vec);
+            let mut ex_names = Vec::new();
+            let mut total_vol = 0.0;
+            for e in ex_list {
+                if let Some(t) = e.get("title").and_then(Value::as_str) {
+                    ex_names.push(json!(t));
+                }
+                let t_id = e.get("exercise_template_id").and_then(Value::as_str).unwrap_or_default();
+                let is_assisted = e.get("type").or_else(|| e.get("exercise_type")).and_then(Value::as_str) == Some("bodyweight_assisted_reps")
+                    || self.is_assisted(t_id).await;
+                if !is_assisted {
+                    if let Some(sets) = e.get("sets").and_then(Value::as_array) {
+                        for s in sets {
+                            let wt = s.get("weight_kg").and_then(Value::as_f64).unwrap_or(0.0);
+                            let r = s.get("reps").and_then(Value::as_i64).unwrap_or(0);
+                            total_vol += wt * (r as f64);
+                        }
+                    }
                 }
             }
-        }
-        let start_raw = w.get("start_time").and_then(Value::as_str).unwrap_or_default();
-        let end_raw = w.get("end_time").and_then(Value::as_str).unwrap_or_default();
-        let start_norm = normalize_iso_timestamp(start_raw);
-        let end_norm = normalize_iso_timestamp(end_raw);
-        let start_loc = to_local_moscow(&start_norm);
-        let duration = calc_duration_min(&start_norm, &end_norm);
+            let start_raw = w.get("start_time").and_then(Value::as_str).unwrap_or_default();
+            let end_raw = w.get("end_time").and_then(Value::as_str).unwrap_or_default();
+            let start_norm = normalize_iso_timestamp(start_raw);
+            let end_norm = normalize_iso_timestamp(end_raw);
+            let start_loc = to_local_moscow(&start_norm);
+            let duration = calc_duration_min(&start_norm, &end_norm);
 
-        let mut sum_item = json!({
-            "id": w.get("id"),
-            "title": w.get("title"),
-            "start_time": start_norm,
-            "end_time": end_norm,
-            "exercises_count": ex_list.len(),
-            "volume_kg": (total_vol * 100.0).round() / 100.0,
-            "exercises": ex_names,
-        });
-        if let Some(loc) = start_loc {
-            sum_item["start_time_local"] = json!(loc);
+            let mut sum_item = json!({
+                "id": w.get("id"),
+                "title": w.get("title"),
+                "start_time": start_norm,
+                "end_time": end_norm,
+                "exercises_count": ex_list.len(),
+                "volume_kg": (total_vol * 100.0).round() / 100.0,
+                "exercises": ex_names,
+            });
+            if let Some(loc) = start_loc {
+                sum_item["start_time_local"] = json!(loc);
+            }
+            if let Some(d) = duration {
+                sum_item["duration_min"] = json!(d);
+            }
+            summary_workouts.push(sum_item);
         }
-        if let Some(d) = duration {
-            sum_item["duration_min"] = json!(d);
-        }
-        summary_workouts.push(sum_item);
+        envelope["workouts"] = Value::Array(summary_workouts);
+        strip_nulls(envelope)
     }
-    envelope["workouts"] = Value::Array(summary_workouts);
-    strip_nulls(envelope)
 }
 
 fn format_routines_list(mut envelope: Value, detail: &str) -> Value {
@@ -830,7 +906,7 @@ fn format_routines_list(mut envelope: Value, detail: &str) -> Value {
     strip_nulls(envelope)
 }
 
-fn format_exercise_history(template_id: &str, val: Value, summary: bool) -> Value {
+fn format_exercise_history(template_id: &str, val: Value, summary: bool, is_assisted: bool) -> Value {
     let Some(history) = val.get("exercise_history").and_then(Value::as_array) else {
         return strip_nulls(val);
     };
@@ -886,22 +962,36 @@ fn format_exercise_history(template_id: &str, val: Value, summary: bool) -> Valu
                 let mut max_w = -1.0;
                 let mut volume = 0.0;
                 let mut best_e1rm = 0.0;
+                let mut best_assisted: Option<(f64, i64)> = None;
                 for s in sets {
                     let wt = s.get("weight_kg").and_then(Value::as_f64).unwrap_or(0.0);
                     let r = s.get("reps").and_then(Value::as_i64).unwrap_or(0);
-                    volume += wt * (r as f64);
-                    let e1rm = if r <= 1 { wt } else { wt * (1.0 + (r as f64) / 30.0) };
-                    if wt > max_w {
-                        max_w = wt;
-                        top_set = Some(json!({"weight_kg": wt, "reps": r}));
-                    }
-                    if e1rm > best_e1rm {
-                        best_e1rm = e1rm;
+                    if is_assisted {
+                        let is_better = match best_assisted {
+                            None => true,
+                            Some((best_wt, best_r)) => wt < best_wt || (wt == best_wt && r > best_r),
+                        };
+                        if is_better {
+                            best_assisted = Some((wt, r));
+                            top_set = Some(json!({"weight_kg": wt, "reps": r}));
+                        }
+                    } else {
+                        volume += wt * (r as f64);
+                        let e1rm = if r <= 1 { wt } else { wt * (1.0 + (r as f64) / 30.0) };
+                        if wt > max_w {
+                            max_w = wt;
+                            top_set = Some(json!({"weight_kg": wt, "reps": r}));
+                        }
+                        if e1rm > best_e1rm {
+                            best_e1rm = e1rm;
+                        }
                     }
                 }
                 w["top_set"] = top_set.unwrap_or(Value::Null);
-                w["volume_kg"] = json!((volume * 100.0).round() / 100.0);
-                w["estimated_1rm"] = json!((best_e1rm * 10.0).round() / 10.0);
+                if !is_assisted {
+                    w["volume_kg"] = json!((volume * 100.0).round() / 100.0);
+                    w["estimated_1rm"] = json!((best_e1rm * 10.0).round() / 10.0);
+                }
             }
             workouts_list.push(w);
         }

@@ -82,6 +82,7 @@ struct Seen {
 struct MockState {
     seen: Mutex<Vec<Seen>>,
     reply: Mutex<(u16, Vec<u8>)>,
+    routes: Mutex<HashMap<String, (u16, Vec<u8>)>>,
 }
 
 /// A tiny HTTP server standing in for api.hevyapp.com: it records every
@@ -96,6 +97,7 @@ impl Hevy {
         let state = Arc::new(MockState {
             seen: Mutex::new(Vec::new()),
             reply: Mutex::new((200, b"{}".to_vec())),
+            routes: Mutex::new(HashMap::new()),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind the mock");
         let url = format!("http://{}", listener.local_addr().expect("mock address"));
@@ -108,6 +110,13 @@ impl Hevy {
 
     fn reply_json(&self, status: u16, body: &Value) {
         *self.state.reply.lock().expect("mock lock") = (status, serde_json::to_vec(body).expect("JSON"));
+    }
+
+    fn route_json(&self, path_and_query: &str, status: u16, body: &Value) {
+        self.state.routes.lock().expect("mock lock").insert(
+            path_and_query.to_string(),
+            (status, serde_json::to_vec(body).expect("JSON")),
+        );
     }
 
     fn reply_text(&self, status: u16, body: &str) {
@@ -135,7 +144,12 @@ async fn mock_handler(State(state): State<Arc<MockState>>, req: Request) -> Resp
         api_key: parts.headers.get("api-key").and_then(|v| v.to_str().ok()).map(String::from),
         body: body.to_vec(),
     });
-    let (status, payload) = state.reply.lock().expect("mock lock").clone();
+    let full_path = match parts.uri.query() {
+        Some(q) => format!("{}?{}", parts.uri.path(), q),
+        None => parts.uri.path().to_string(),
+    };
+    let route_reply = state.routes.lock().expect("mock lock").get(&full_path).cloned();
+    let (status, payload) = route_reply.unwrap_or_else(|| state.reply.lock().expect("mock lock").clone());
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
@@ -1234,4 +1248,201 @@ async fn test_list_workouts_and_routines_summary_mode() {
     assert_eq!(r1["title"], "Push Day");
     assert_eq!(r1["exercises"], json!(["Bench Press"]));
     assert_eq!(r1["updated_at"], "2026-08-04T10:00:00Z");
+}
+
+#[tokio::test]
+async fn test_regression_b4_bodyweight_assisted_reps() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // Template with type bodyweight_assisted_reps
+    let template = json!({
+        "id": "gravitron_1",
+        "title": "Assisted Pull-Up",
+        "type": "bodyweight_assisted_reps",
+        "primary_muscle_group": "lats"
+    });
+    hevy.route_json("/v1/exercise_templates/gravitron_1", 200, &template);
+
+    let history = json!({
+        "exercise_history": [
+            {
+                "workout_id": "w1",
+                "workout_title": "Pull Day",
+                "workout_start_time": "2026-08-01T10:00:00Z",
+                "workout_end_time": "2026-08-01T11:00:00Z",
+                "exercise_template_id": "gravitron_1",
+                "weight_kg": 20.0,
+                "reps": 10,
+                "set_type": "normal"
+            },
+            {
+                "workout_id": "w1",
+                "workout_title": "Pull Day",
+                "workout_start_time": "2026-08-01T10:00:00Z",
+                "workout_end_time": "2026-08-01T11:00:00Z",
+                "exercise_template_id": "gravitron_1",
+                "weight_kg": 15.0,
+                "reps": 8,
+                "set_type": "normal"
+            },
+            {
+                "workout_id": "w1",
+                "workout_title": "Pull Day",
+                "workout_start_time": "2026-08-01T10:00:00Z",
+                "workout_end_time": "2026-08-01T11:00:00Z",
+                "exercise_template_id": "gravitron_1",
+                "weight_kg": 15.0,
+                "reps": 10,
+                "set_type": "normal"
+            }
+        ]
+    });
+    hevy.route_json("/v1/exercise_history/gravitron_1", 200, &history);
+
+    let res = mcp
+        .call_tool(
+            "get_exercise_history",
+            json!({"exercise_template_id": "gravitron_1", "summary": true}),
+        )
+        .await;
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    let payload = tool_json(&res);
+    let w1 = &payload["workouts"][0];
+
+    // For bodyweight_assisted_reps:
+    // - top_set is the set with least assistance, then most reps: 15kg x 10 reps
+    assert_eq!(w1["top_set"], json!({"weight_kg": 15.0, "reps": 10}));
+    // - volume_kg must NOT be computed
+    assert!(w1.get("volume_kg").is_none(), "assisted exercise should have no volume_kg");
+    // - estimated_1rm must NOT be computed
+    assert!(w1.get("estimated_1rm").is_none(), "assisted exercise should have no estimated_1rm");
+
+    // Also verify list_workouts summary does not count assisted exercise weight in volume_kg
+    let workouts = json!({
+        "page": 1,
+        "page_count": 1,
+        "workouts": [
+            {
+                "id": "w2",
+                "title": "Pull Day",
+                "start_time": "2026-08-01T10:00:00Z",
+                "end_time": "2026-08-01T11:00:00Z",
+                "exercises": [
+                    {
+                        "exercise_template_id": "bench",
+                        "title": "Bench Press",
+                        "sets": [{"weight_kg": 50.0, "reps": 10}]
+                    },
+                    {
+                        "exercise_template_id": "gravitron_1",
+                        "title": "Assisted Pull-Up",
+                        "sets": [{"weight_kg": 20.0, "reps": 10}]
+                    }
+                ]
+            }
+        ]
+    });
+    hevy.route_json("/v1/workouts?page=1&pageSize=10", 200, &workouts);
+    let list_res = mcp.call_tool("list_workouts", json!({})).await;
+    let list_payload = tool_json(&list_res);
+    // Bench only = 50 * 10 = 500.0 kg. Gravitron's 200 kg assistance is not load.
+    assert_eq!(list_payload["workouts"][0]["volume_kg"], json!(500.0));
+}
+
+#[tokio::test]
+async fn test_regression_b11_paging_past_end_real_page_count() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // Upstream has 3 pages; page 99 returns 404
+    hevy.reply_text(404, r#"{"error": "Page not found"}"#);
+    hevy.route_json("/v1/workouts?page=1&pageSize=10", 200, &json!({
+        "page": 1,
+        "page_count": 3,
+        "workouts": []
+    }));
+
+    let list_res = mcp.call_tool("list_workouts", json!({"page": 99})).await;
+    assert!(!list_res["isError"].as_bool().unwrap_or(false));
+    let list_payload = tool_json(&list_res);
+    assert_eq!(list_payload["page"], 99);
+    assert_eq!(list_payload["page_count"], 3);
+    assert_eq!(list_payload["workouts"], json!([]));
+}
+
+#[tokio::test]
+async fn test_output_schema_contract_for_all_read_tools() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // Set up standard mock responses for read endpoints
+    hevy.route_json("/v1/workouts/count", 200, &json!({"workout_count": 42}));
+    hevy.route_json("/v1/workouts?page=1&pageSize=10", 200, &json!({
+        "page": 1, "page_count": 1, "workouts": [{
+            "id": "w1", "title": "Chest", "start_time": "2026-08-01T10:00:00Z", "end_time": "2026-08-01T11:00:00Z", "exercises": []
+        }]
+    }));
+    hevy.route_json("/v1/workouts/w1", 200, &json!({
+        "id": "w1", "title": "Chest", "start_time": "2026-08-01T10:00:00Z", "end_time": "2026-08-01T11:00:00Z", "exercises": []
+    }));
+    hevy.route_json("/v1/routines?page=1&pageSize=10", 200, &json!({
+        "page": 1, "page_count": 1, "routines": [{
+            "id": "r1", "title": "Push", "folder_id": null, "updated_at": "2026-08-01T10:00:00Z", "exercises": []
+        }]
+    }));
+    hevy.route_json("/v1/routines/r1", 200, &json!({
+        "id": "r1", "title": "Push", "exercises": []
+    }));
+    hevy.route_json("/v1/routine_folders?page=1&pageSize=10", 200, &json!({
+        "page": 1, "page_count": 1, "routine_folders": [{"id": 1, "title": "Split"}]
+    }));
+    hevy.route_json("/v1/routine_folders/1", 200, &json!({"id": 1, "title": "Split"}));
+    hevy.route_json("/v1/user/info", 200, &json!({"data": {"id": "u1", "username": "ilode", "name": "Timur"}}));
+    hevy.route_json("/v1/exercise_templates?page=1&pageSize=100", 200, &json!({
+        "page": 1, "page_count": 1, "exercise_templates": [{"id": "bench", "title": "Bench Press", "type": "weight_reps"}]
+    }));
+    hevy.route_json("/v1/exercise_templates/bench", 200, &json!({
+        "id": "bench", "title": "Bench Press", "type": "weight_reps"
+    }));
+    hevy.route_json("/v1/exercise_history/bench", 200, &json!({
+        "exercise_history": []
+    }));
+
+    let tools_list = mcp.rpc("tools/list", json!({})).await;
+    let tools = tools_list["tools"].as_array().expect("tools array");
+
+    let read_cases = [
+        ("workout_count", json!({})),
+        ("list_workouts", json!({})),
+        ("get_workout", json!({"workout_id": "w1"})),
+        ("list_routines", json!({})),
+        ("get_routine", json!({"routine_id": "r1"})),
+        ("list_routine_folders", json!({})),
+        ("get_routine_folder", json!({"folder_id": 1})),
+        ("get_user_info", json!({})),
+        ("search_exercise_templates", json!({"query": "bench"})),
+        ("get_exercise_template", json!({"template_id": "bench"})),
+        ("get_exercise_history", json!({"exercise_template_id": "bench"})),
+    ];
+
+    for (name, args) in read_cases {
+        let tool_def = tools.iter().find(|t| t["name"] == name).unwrap_or_else(|| panic!("tool {name} not found"));
+        let output_schema = &tool_def["outputSchema"];
+        let validator = jsonschema::validator_for(output_schema).unwrap_or_else(|e| panic!("invalid schema for {name}: {e}"));
+
+        let res = mcp.call_tool(name, args).await;
+        assert!(!res["isError"].as_bool().unwrap_or(false), "tool {name} errored: {res}");
+        let structured = &res["structuredContent"];
+        assert!(!structured.is_null(), "tool {name} missing structuredContent");
+
+        let errors: Vec<String> = validator.iter_errors(structured).map(|e| e.to_string()).collect();
+        assert!(errors.is_empty(), "tool {name} output failed outputSchema validation:\nSchema: {output_schema}\nPayload: {structured}\nErrors: {errors:?}");
+    }
 }
