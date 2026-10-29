@@ -1055,7 +1055,7 @@ async fn test_error_handling_and_404_conventions() {
     mcp.connect(false).await;
 
     // 1. Paginated out-of-bounds page returns empty list with page_count (not error)
-    hevy.reply_text(404, "{"error": "Page not found"}");
+    hevy.reply_text(404, r#"{"error": "Page not found"}"#);
     let list_res = mcp.call_tool("list_workouts", json!({"page": 99})).await;
     assert!(!list_res["isError"].as_bool().unwrap_or(false));
     let list_payload = tool_json(&list_res);
