@@ -268,30 +268,81 @@ impl HevyMcp {
                 })
             }
             "update_routine" => {
-                let routine = json!({
-                    "title": a.get("title"),
-                    "notes": a.get("notes"),
-                    "exercises": exercises(&a, false),
-                });
+                let id = a.str("routine_id");
                 dict(match guard {
-                    Ok(()) => hevy.update_routine(a.str("routine_id"), routine).await,
                     Err(e) => Err(e),
+                    Ok(()) => {
+                        let notes = match a.0.get("notes") {
+                            Some(v) => v.clone(),
+                            None => match hevy.get_routine(id).await {
+                                Ok(current) => {
+                                    let cur_r = current.get("routine").unwrap_or(&current);
+                                    cur_r.get("notes").cloned().unwrap_or(Value::Null)
+                                }
+                                Err(e) => return Outcome::Dict(err_dict(e)),
+                            },
+                        };
+                        let routine = json!({
+                            "title": a.get("title"),
+                            "notes": notes,
+                            "exercises": exercises(&a, false),
+                        });
+                        hevy.update_routine(id, routine).await
+                    }
                 })
             }
             "create_routine_folder" => dict(hevy.create_routine_folder(a.str("title")).await),
-            "create_workout" | "update_workout" => {
+            "create_workout" => {
+                let is_private = a.0.get("is_private").cloned().unwrap_or(json!(true));
                 let workout = json!({
                     "title": a.get("title"),
                     "description": a.get("description"),
                     "start_time": a.get("start_time"),
                     "end_time": a.get("end_time"),
-                    "is_private": a.get("is_private"),
+                    "is_private": is_private,
                     "exercises": exercises(&a, true),
                 });
                 dict(match guard {
                     Err(e) => Err(e),
-                    Ok(()) if name == "create_workout" => hevy.create_workout(workout).await,
-                    Ok(()) => hevy.update_workout(a.str("workout_id"), workout).await,
+                    Ok(()) => hevy.create_workout(workout).await,
+                })
+            }
+            "update_workout" => {
+                let id = a.str("workout_id");
+                dict(match guard {
+                    Err(e) => Err(e),
+                    Ok(()) => {
+                        let (is_private, description) = if a.0.contains_key("is_private")
+                            && a.0.contains_key("description")
+                        {
+                            (a.get("is_private"), a.get("description"))
+                        } else {
+                            match hevy.get_workout(id).await {
+                                Ok(current) => {
+                                    let cur_w = current.get("workout").unwrap_or(&current);
+                                    let p = match a.0.get("is_private") {
+                                        Some(v) => v.clone(),
+                                        None => cur_w.get("is_private").cloned().unwrap_or(json!(false)),
+                                    };
+                                    let d = match a.0.get("description") {
+                                        Some(v) => v.clone(),
+                                        None => cur_w.get("description").cloned().unwrap_or(Value::Null),
+                                    };
+                                    (p, d)
+                                }
+                                Err(e) => return Outcome::Dict(err_dict(e)),
+                            }
+                        };
+                        let workout = json!({
+                            "title": a.get("title"),
+                            "description": description,
+                            "start_time": a.get("start_time"),
+                            "end_time": a.get("end_time"),
+                            "is_private": is_private,
+                            "exercises": exercises(&a, true),
+                        });
+                        hevy.update_workout(id, workout).await
+                    }
                 })
             }
             "create_exercise_template" => {

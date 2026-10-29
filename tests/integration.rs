@@ -456,6 +456,8 @@ fn case(name: &'static str, args: Value, method: &'static str, path: &'static st
 fn cases() -> Vec<Case> {
     let mut update_workout = workout();
     update_workout["workout_id"] = json!("w1");
+    update_workout["is_private"] = json!(false);
+    update_workout["description"] = json!("Test description");
     vec![
         case("workout_count", json!({}), "GET", "/v1/workouts/count"),
         case("list_workouts", json!({"page_size": 50}), "GET", "/v1/workouts"),
@@ -485,7 +487,7 @@ fn cases() -> Vec<Case> {
         case("create_routine", json!({"title": "Test routine", "exercises": exercises()}), "POST", "/v1/routines"),
         case(
             "update_routine",
-            json!({"routine_id": "r1", "title": "Test routine", "exercises": exercises()}),
+            json!({"routine_id": "r1", "title": "Test routine", "notes": "Test notes", "exercises": exercises()}),
             "PUT",
             "/v1/routines/r1",
         ),
@@ -868,3 +870,66 @@ async fn acceptance_revision_2026_07_28_discover_cache_scope_and_subscriptions_l
         "stream should stay open, but closed early: {next_frame:?}"
     );
 }
+
+#[tokio::test]
+async fn test_update_workout_safe_defaults() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // 1. Initial workout on Hevy with is_private = true and non-empty description
+    let initial_workout = json!({
+        "workout": {
+            "id": "w_safe",
+            "title": "Private Leg Day",
+            "description": "Heavy squats, secret notes",
+            "is_private": true,
+            "start_time": "2026-09-01T10:00:00Z",
+            "end_time": "2026-09-01T11:00:00Z",
+            "exercises": exercises()
+        }
+    });
+    hevy.reply_json(200, &initial_workout);
+
+    // 2. Read the workout via get_workout
+    let read_res = mcp.call_tool("get_workout", json!({"workout_id": "w_safe"})).await;
+    assert!(!read_res["isError"].as_bool().unwrap_or(false));
+    let seen_read = hevy.take();
+    assert_eq!(seen_read.len(), 1);
+    assert_eq!(seen_read[0].path, "/v1/workouts/w_safe");
+
+    // 3. Update workout WITHOUT providing is_private or description
+    hevy.reply_json(200, &json!({"ok": "updated"}));
+    let mut update_args = workout();
+    update_args["workout_id"] = json!("w_safe");
+    update_args["title"] = json!("Updated Leg Day");
+    assert!(update_args.get("is_private").is_none());
+    assert!(update_args.get("description").is_none());
+
+    let update_res = mcp.call_tool("update_workout", update_args).await;
+    assert!(!update_res["isError"].as_bool().unwrap_or(false));
+
+    // The connector must read the workout first, then issue PUT with preserved fields
+    let seen_update = hevy.take();
+    assert_eq!(seen_update.len(), 2, "Expected GET then PUT");
+    assert_eq!(seen_update[0].method, "GET");
+    assert_eq!(seen_update[0].path, "/v1/workouts/w_safe");
+    assert_eq!(seen_update[1].method, "PUT");
+    assert_eq!(seen_update[1].path, "/v1/workouts/w_safe");
+
+    let put_body: Value = serde_json::from_slice(&seen_update[1].body).expect("valid PUT body JSON");
+    let sent_workout = &put_body["workout"];
+    assert_eq!(
+        sent_workout["is_private"],
+        json!(true),
+        "is_private must be preserved from existing workout"
+    );
+    assert_eq!(
+        sent_workout["description"],
+        json!("Heavy squats, secret notes"),
+        "description must be preserved from existing workout"
+    );
+    assert_eq!(sent_workout["title"], json!("Updated Leg Day"));
+}
+

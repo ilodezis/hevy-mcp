@@ -663,8 +663,7 @@
       {
        "type": "null"
       }
-     ],
-     "default": null
+     ]
     }
    },
    "required": [
@@ -876,7 +875,7 @@
      "default": null
     },
     "is_private": {
-     "default": false,
+     "default": true,
      "type": "boolean"
     }
    },
@@ -1063,11 +1062,9 @@
       {
        "type": "null"
       }
-     ],
-     "default": null
+     ]
     },
     "is_private": {
-     "default": false,
      "type": "boolean"
     }
    },
