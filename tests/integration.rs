@@ -899,8 +899,10 @@ async fn test_update_workout_safe_defaults() {
     assert_eq!(seen_read.len(), 1);
     assert_eq!(seen_read[0].path, "/v1/workouts/w_safe");
 
-    // 3. Update workout WITHOUT providing is_private or description
-    hevy.reply_json(200, &json!({"ok": "updated"}));
+    // 3. Update workout WITHOUT providing is_private or description. The mock
+    // answers every request with one body, so it keeps serving the private
+    // workout: that is what the connector's GET must see before its PUT.
+    hevy.reply_json(200, &initial_workout);
     let mut update_args = workout();
     update_args["workout_id"] = json!("w_safe");
     update_args["title"] = json!("Updated Leg Day");
