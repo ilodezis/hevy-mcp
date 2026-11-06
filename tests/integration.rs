@@ -264,6 +264,10 @@ impl Server {
         if let Some(path) = std::env::var_os("PATH") {
             command.env("PATH", path);
         }
+        // Windows cannot initialise Winsock without SystemRoot (error 10106), so keep it.
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", root);
+        }
         command
             .env("HEVY_MCP_SESSION_SECRET", SECRET)
             .env("HEVY_MCP_PASSWORD", PASSWORD)
