@@ -251,7 +251,7 @@ impl HevyMcp {
                     }
                     Err(HevyError::Api { status: 404, .. }) => {
                         let page = a.int("page");
-                        let page_size = a.int("page_size");
+                        let page_size = if a.int("page_size") > 0 { a.int("page_size") } else { 10 };
                         let real_page_count = if page > 1 {
                             match hevy.get_workouts(1, page_size).await {
                                 Ok(env) => env.get("page_count").and_then(Value::as_i64).unwrap_or(0),
@@ -287,7 +287,7 @@ impl HevyMcp {
                     }
                     Err(HevyError::Api { status: 404, .. }) => {
                         let page = a.int("page");
-                        let page_size = a.int("page_size");
+                        let page_size = if a.int("page_size") > 0 { a.int("page_size") } else { 10 };
                         let real_page_count = if page > 1 {
                             match hevy.get_routines(1, page_size).await {
                                 Ok(env) => env.get("page_count").and_then(Value::as_i64).unwrap_or(0),
@@ -329,7 +329,7 @@ impl HevyMcp {
                     }
                     Err(HevyError::Api { status: 404, .. }) => {
                         let page = a.int("page");
-                        let page_size = a.int("page_size");
+                        let page_size = if a.int("page_size") > 0 { a.int("page_size") } else { 10 };
                         let real_page_count = if page > 1 {
                             match hevy.get_routine_folders(1, page_size).await {
                                 Ok(env) => env.get("page_count").and_then(Value::as_i64).unwrap_or(0),
