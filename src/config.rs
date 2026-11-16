@@ -25,6 +25,25 @@ pub struct Config {
     pub mcp_client_id: String,
     pub mcp_client_secret: String,
     pub mcp_redirect_uris: Vec<String>,
+    /// Optional static Bearer token for MCP clients that cannot run the OAuth flow.
+    pub agent_token: Option<String>,
+}
+
+/// Shortest accepted `HEVY_MCP_AGENT_TOKEN`: it is a long-lived credential.
+const AGENT_TOKEN_MIN_LEN: usize = 32;
+
+/// Unset or empty disables the static token; a short value is a startup error.
+fn parse_agent_token(raw: &str) -> Result<Option<String>, String> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if raw.chars().count() < AGENT_TOKEN_MIN_LEN {
+        return Err(format!(
+            "HEVY_MCP_AGENT_TOKEN must be at least {AGENT_TOKEN_MIN_LEN} characters \
+             — generate one with `openssl rand -hex 32`"
+        ));
+    }
+    Ok(Some(raw.to_string()))
 }
 
 impl Config {
@@ -40,6 +59,7 @@ impl Config {
         if !matches!(cookie_samesite.to_ascii_lowercase().as_str(), "strict" | "lax" | "none") {
             return Err("HEVY_MCP_COOKIE_SAMESITE must be 'strict', 'lax' or 'none'".into());
         }
+        let agent_token = parse_agent_token(&getenv("HEVY_MCP_AGENT_TOKEN", ""))?;
         Ok(Self {
             hevy_api_key: getenv("HEVY_API_KEY", ""),
             hevy_base_url: getenv("HEVY_BASE_URL", DEFAULT_HEVY_BASE_URL),
@@ -52,6 +72,7 @@ impl Config {
             mcp_client_id: getenv("HEVY_MCP_CLIENT_ID", "hevy-claude-connector"),
             mcp_client_secret: getenv("HEVY_MCP_CLIENT_SECRET", ""),
             mcp_redirect_uris: env_csv("HEVY_MCP_REDIRECT_URIS", &[DEFAULT_REDIRECT_URI]),
+            agent_token,
         })
     }
 }
@@ -380,6 +401,13 @@ mod tests {
 
     fn parsed(text: &str) -> Vec<(String, Option<String>)> {
         resolve(parse_dotenv(text), &HashMap::new())
+    }
+
+    #[test]
+    fn agent_token_is_optional_and_needs_32_chars() {
+        assert_eq!(parse_agent_token(""), Ok(None));
+        assert_eq!(parse_agent_token(&"a".repeat(32)), Ok(Some("a".repeat(32))));
+        assert!(parse_agent_token(&"a".repeat(31)).unwrap_err().contains("HEVY_MCP_AGENT_TOKEN"));
     }
 
     fn kv(k: &str, v: &str) -> (String, Option<String>) {

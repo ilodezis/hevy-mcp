@@ -250,6 +250,10 @@ struct Server {
 
 impl Server {
     async fn start(hevy_url: &str, api_key: &str) -> Self {
+        Self::start_with(hevy_url, api_key, &[]).await
+    }
+
+    async fn start_with(hevy_url: &str, api_key: &str, extra_env: &[(&str, &str)]) -> Self {
         let port = {
             let probe = TcpListener::bind("127.0.0.1:0").expect("find a free port");
             probe.local_addr().expect("probe address").port()
@@ -277,7 +281,8 @@ impl Server {
             .env("HEVY_MCP_COOKIE_SECURE", "false")
             .env("HEVY_API_KEY", api_key)
             .env("HEVY_BASE_URL", hevy_url)
-            .env("HEVY_MCP_BIND", format!("127.0.0.1:{port}"));
+            .env("HEVY_MCP_BIND", format!("127.0.0.1:{port}"))
+            .envs(extra_env.iter().copied());
         let child = command.spawn().expect("spawn hevy-mcp");
 
         let mut server = Self {
@@ -557,6 +562,88 @@ async fn health_and_auth_for_both_protocols() {
     let valid = mint_token(CLIENT_ID);
     let response = server.send(Call::post(&format!("/mcp/?token={valid}")).json(&json!({}))).await;
     assert_eq!(response.status, 401);
+}
+
+const AGENT_TOKEN: &str = "integration-agent-token-0123456789abcdef";
+
+async fn status_with_bearer(server: &Server, bearer: &str) -> Resp {
+    server
+        .send(
+            Call::post("/mcp/")
+                .header("accept", ACCEPT)
+                .header("mcp-protocol-version", LEGACY)
+                .header("authorization", format!("Bearer {bearer}"))
+                .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn agent_token_opens_the_mcp_endpoint() {
+    let hevy = Hevy::start().await;
+    let server = Server::start_with(&hevy.url, API_KEY, &[("HEVY_MCP_AGENT_TOKEN", AGENT_TOKEN)]).await;
+
+    for modern in [false, true] {
+        let mut mcp = Mcp::new(&server, AGENT_TOKEN);
+        mcp.connect(modern).await;
+        let tools = mcp.rpc("tools/list", json!({})).await;
+        assert!(tools["tools"].as_array().is_some_and(|t| !t.is_empty()), "modern={modern}");
+    }
+
+    // OAuth access tokens keep working next to it.
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // Anything else is refused, with the usual challenge.
+    let wrong_same_length = "x".repeat(AGENT_TOKEN.len());
+    let wrong_prefix = AGENT_TOKEN[..AGENT_TOKEN.len() - 1].to_string();
+    let wrong_longer = format!("{AGENT_TOKEN}!");
+    for bearer in ["", "wrong", wrong_same_length.as_str(), wrong_prefix.as_str(), wrong_longer.as_str()] {
+        let response = status_with_bearer(&server, bearer).await;
+        assert_eq!(response.status, 401, "{bearer:?}");
+        assert_eq!(response.header("www-authenticate"), "Bearer", "{bearer:?}");
+    }
+
+    // The token is not a way into the login-gated pages, and no bearer is still 401.
+    let response = server.send(Call::post("/oauth/token").header("authorization", format!("Bearer {AGENT_TOKEN}"))).await;
+    assert_ne!(response.status, 200);
+    let response = server.send(Call::post("/mcp/").json(&json!({}))).await;
+    assert_eq!(response.status, 401);
+}
+
+#[tokio::test]
+async fn agent_token_unset_accepts_no_bearer() {
+    let hevy = Hevy::start().await;
+    // Unset and set-but-empty behave the same.
+    let unset = Server::start(&hevy.url, API_KEY).await;
+    let empty = Server::start_with(&hevy.url, API_KEY, &[("HEVY_MCP_AGENT_TOKEN", "")]).await;
+    for server in [&unset, &empty] {
+        for bearer in ["", AGENT_TOKEN, "null", "None"] {
+            let response = status_with_bearer(server, bearer).await;
+            assert_eq!(response.status, 401, "{bearer:?}");
+            assert_eq!(response.header("www-authenticate"), "Bearer", "{bearer:?}");
+        }
+    }
+}
+
+#[test]
+fn short_agent_token_fails_startup() {
+    let dir = std::env::temp_dir().join(format!("hevy-mcp-it-short-token-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("scratch directory");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hevy-mcp"));
+    command.current_dir(&dir).env_clear();
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", root);
+    }
+    let output = command
+        .env("HEVY_MCP_SESSION_SECRET", SECRET)
+        .env("HEVY_MCP_AGENT_TOKEN", "x".repeat(31))
+        .output()
+        .expect("run hevy-mcp");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!output.status.success(), "the server started with a short agent token");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("HEVY_MCP_AGENT_TOKEN must be at least 32"), "{stderr}");
 }
 
 async fn exercise_tools(modern: bool) {

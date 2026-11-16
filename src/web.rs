@@ -92,6 +92,14 @@ impl App {
         })
     }
 
+    /// The optional static agent token; never matches when it is not configured.
+    fn agent_token_valid(&self, token: &str) -> bool {
+        self.cfg
+            .agent_token
+            .as_deref()
+            .is_some_and(|expected| !expected.is_empty() && ct_eq(token.as_bytes(), expected.as_bytes()))
+    }
+
     fn store_code(&self, code: String, data: CodeData) {
         let now = Instant::now();
         let mut codes = self.codes.lock().expect("code store lock");
@@ -422,7 +430,7 @@ async fn mcp_endpoint(app: &App, req: Request, path: &str) -> Response {
         .get(..7)
         .filter(|prefix| prefix.eq_ignore_ascii_case("bearer "))
         .map(|_| &auth[7..]);
-    if !token.is_some_and(|t| !t.is_empty() && app.token_valid(t)) {
+    if !token.is_some_and(|t| !t.is_empty() && (app.token_valid(t) || app.agent_token_valid(t))) {
         let mut resp = detail(StatusCode::UNAUTHORIZED, "Unauthorized. Invalid or missing MCP access token.");
         resp.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         return resp;

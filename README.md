@@ -75,6 +75,7 @@ Settings come from environment variables. On start the server also loads the fir
 | `HEVY_MCP_CLIENT_ID` | `hevy-claude-connector` | OAuth client id that Claude must present. |
 | `HEVY_MCP_CLIENT_SECRET` | empty | OAuth client secret. If empty, the token endpoint rejects every request. |
 | `HEVY_MCP_REDIRECT_URIS` | `https://claude.ai/api/mcp/auth_callback` | Comma-separated allow-list of OAuth redirect URIs. |
+| `HEVY_MCP_AGENT_TOKEN` | unset | Optional static Bearer token for MCP clients that cannot run the OAuth flow, such as a local agent on the same host. Send it as `Authorization: Bearer <value>` to `/mcp/`. At least 32 characters, or the server refuses to start; empty or unset disables it. Generate with `openssl rand -hex 32`. |
 | `HEVY_MCP_COOKIE_SECURE` | `true` | Marks the session cookie `Secure`. Set `false` only for local HTTP testing. |
 | `HEVY_MCP_COOKIE_SAMESITE` | `lax` | `strict`, `lax` or `none`. |
 | `HEVY_MCP_BIND` | `0.0.0.0:8010` | Listen address. |
@@ -141,6 +142,7 @@ This is built for one person, and the design leans on that.
 - **Session cookie:** `HttpOnly`, `Secure` by default, `SameSite=lax` by default, valid for 30 days.
 - **Authorization codes:** random, single use, valid for 5 minutes, held in memory. PKCE is supported (`S256` and `plain`) and enforced whenever Claude sends a challenge. The post-login redirect only accepts same-site paths.
 - **Access tokens:** HMAC-signed with a timestamp, valid for one year, accepted only in the `Authorization: Bearer` header, never in a query string. The browser cookie and the access token use different salts, so one cannot be replayed as the other.
+- **Agent token:** when `HEVY_MCP_AGENT_TOKEN` is set, that exact value is also accepted as a Bearer token on `/mcp/` and nowhere else, compared in constant time. It does not expire; remove or change the variable and restart to revoke it.
 - **Revocation:** tokens are stateless, so there is no per-token revoke. Rotating `HEVY_MCP_SESSION_SECRET` invalidates every token and session at once; Claude then has to reconnect. Changing `HEVY_MCP_CLIENT_ID` does the same.
 - **Secrets stay server-side:** the Hevy API key is only ever sent to Hevy.
 - **Limits:** login and OAuth form bodies are capped at 1 MB.
