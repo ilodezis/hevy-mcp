@@ -27,6 +27,10 @@ pub struct Config {
     pub mcp_redirect_uris: Vec<String>,
     /// Optional static Bearer token for MCP clients that cannot run the OAuth flow.
     pub agent_token: Option<String>,
+    /// IANA timezone used for `start_time_local` (defaults to `UTC`).
+    pub timezone: chrono_tz::Tz,
+    /// Optional explicit public origin (e.g. `https://mcp.example.com`), overriding `Host`/`X-Forwarded-Proto`.
+    pub public_url: Option<String>,
 }
 
 /// Shortest accepted `HEVY_MCP_AGENT_TOKEN`: it is a long-lived credential.
@@ -46,6 +50,31 @@ fn parse_agent_token(raw: &str) -> Result<Option<String>, String> {
     Ok(Some(raw.to_string()))
 }
 
+fn parse_timezone(raw: &str) -> Result<chrono_tz::Tz, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(chrono_tz::Tz::UTC);
+    }
+    trimmed
+        .parse::<chrono_tz::Tz>()
+        .map_err(|_| format!("TIMEZONE '{trimmed}' is not a valid IANA timezone name"))
+}
+
+fn parse_public_url(raw: &str) -> Result<Option<String>, String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .ok_or_else(|| format!("PUBLIC_URL '{trimmed}' must start with http:// or https://"))?;
+    if rest.is_empty() || rest.starts_with('/') {
+        return Err(format!("PUBLIC_URL '{trimmed}' must include a host"));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, String> {
         let session_secret = getenv("HEVY_MCP_SESSION_SECRET", "");
@@ -60,6 +89,8 @@ impl Config {
             return Err("HEVY_MCP_COOKIE_SAMESITE must be 'strict', 'lax' or 'none'".into());
         }
         let agent_token = parse_agent_token(&getenv("HEVY_MCP_AGENT_TOKEN", ""))?;
+        let timezone = parse_timezone(&getenv("TIMEZONE", ""))?;
+        let public_url = parse_public_url(&getenv("PUBLIC_URL", ""))?;
         Ok(Self {
             hevy_api_key: getenv("HEVY_API_KEY", ""),
             hevy_base_url: getenv("HEVY_BASE_URL", DEFAULT_HEVY_BASE_URL),
@@ -73,6 +104,8 @@ impl Config {
             mcp_client_secret: getenv("HEVY_MCP_CLIENT_SECRET", ""),
             mcp_redirect_uris: env_csv("HEVY_MCP_REDIRECT_URIS", &[DEFAULT_REDIRECT_URI]),
             agent_token,
+            timezone,
+            public_url,
         })
     }
 }
@@ -408,6 +441,25 @@ mod tests {
         assert_eq!(parse_agent_token(""), Ok(None));
         assert_eq!(parse_agent_token(&"a".repeat(32)), Ok(Some("a".repeat(32))));
         assert!(parse_agent_token(&"a".repeat(31)).unwrap_err().contains("HEVY_MCP_AGENT_TOKEN"));
+    }
+
+    #[test]
+    fn timezone_defaults_to_utc_and_validates_iana() {
+        assert_eq!(parse_timezone(""), Ok(chrono_tz::Tz::UTC));
+        assert_eq!(parse_timezone("  "), Ok(chrono_tz::Tz::UTC));
+        assert_eq!(parse_timezone("Europe/Chisinau"), Ok(chrono_tz::Europe::Chisinau));
+        assert!(parse_timezone("Mars/Olympus").is_err());
+    }
+
+    #[test]
+    fn public_url_trims_trailing_slash_and_validates_scheme() {
+        assert_eq!(parse_public_url(""), Ok(None));
+        assert_eq!(
+            parse_public_url("https://mcp.example.com/"),
+            Ok(Some("https://mcp.example.com".to_string()))
+        );
+        assert!(parse_public_url("mcp.example.com").is_err());
+        assert!(parse_public_url("https://").is_err());
     }
 
     fn kv(k: &str, v: &str) -> (String, Option<String>) {

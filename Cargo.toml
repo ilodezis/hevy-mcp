@@ -34,6 +34,8 @@ miniz_oxide = "0.9"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10.4"
 
 [dev-dependencies]
 jsonschema = { version = "0.61", default-features = false }

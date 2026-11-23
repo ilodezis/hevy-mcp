@@ -79,6 +79,8 @@ Settings come from environment variables. On start the server also loads the fir
 | `HEVY_MCP_COOKIE_SECURE` | `true` | Marks the session cookie `Secure`. Set `false` only for local HTTP testing. |
 | `HEVY_MCP_COOKIE_SAMESITE` | `lax` | `strict`, `lax` or `none`. |
 | `HEVY_MCP_BIND` | `0.0.0.0:8010` | Listen address. |
+| `TIMEZONE` | `UTC` | IANA timezone name (e.g. `Europe/Chisinau`) for `start_time_local` formatting. |
+| `PUBLIC_URL` | unset | Optional explicit public origin (e.g. `https://mcp.example.com`) for OAuth and resource metadata URLs, overriding `Host` / `X-Forwarded-Proto`. |
 
 `.env` is parsed with python-dotenv semantics (quoting, inline `#` comments, escapes, `${VAR}` and `${VAR:-default}` expansion), so a `$` or `#` inside a password behaves the way you would expect from that format. Wrap such values in single quotes if in doubt.
 
@@ -88,7 +90,7 @@ The password and both secrets are plain strings you invent. The two secrets shou
 
 1. Deploy the server behind HTTPS (see [Deployment](#deployment)).
 2. In Claude.ai open **Settings → Connectors → Add custom connector**.
-3. Set the URL to `https://your.host.example/mcp/`. The trailing slash matters; `/mcp` redirects to `/mcp/`.
+3. Set the URL to `https://your.host.example/mcp` (or `/mcp/` — both are served directly).
 4. In the connector's advanced settings enter the OAuth client id and secret, the values of `HEVY_MCP_CLIENT_ID` and `HEVY_MCP_CLIENT_SECRET`. The server has no dynamic client registration, so Claude needs them up front.
 5. Claude opens the login page on your server. Enter `HEVY_MCP_PASSWORD`, then approve the access on the consent page.
 
@@ -119,10 +121,10 @@ The login and consent pages are written in Russian. They are two small templates
 | Tool | Arguments | Effect |
 |---|---|---|
 | `create_routine` | `title`, `exercises`, `notes`, `folder_id` | Creates a routine. |
-| `update_routine` | `routine_id`, `title`, `exercises`, `notes` | **Replaces** the routine. Read it with `get_routine` first and send the complete desired state. |
+| `update_routine` | `routine_id`, `title`, `exercises`, `notes` | Updates the routine. Omitted `notes` or `exercises` are preserved from the existing routine. |
 | `create_routine_folder` | `title` | Creates a folder. |
 | `create_workout` | `title`, `start_time`, `end_time`, `exercises`, `description`, `is_private` | Logs a completed workout. |
-| `update_workout` | `workout_id`, `title`, `start_time`, `end_time`, `exercises`, `description`, `is_private` | **Overwrites** a logged workout with the state you send. |
+| `update_workout` | `workout_id`, `title`, `start_time`, `end_time`, `exercises`, `description`, `is_private` | Updates a logged workout. Omitted `description`, `is_private`, or `exercises` are preserved. |
 | `create_exercise_template` | `title`, `exercise_type`, `equipment_category`, `muscle_group`, `other_muscles` | Creates a custom exercise. Hevy may refuse this on some plans. |
 
 An exercise slot is `{exercise_template_id, sets, superset_id?, rest_seconds?, notes?}`. A set carries `type` (`warmup`, `normal`, `failure` or `dropset`) plus whichever of `weight_kg`, `reps`, `distance_meters`, `duration_seconds` fits the exercise, and optionally `rpe` and `custom_metric`. Give exercises the same integer `superset_id` to group them into a superset. The exact schemas are in `src/tools.json`.
@@ -138,9 +140,9 @@ An exercise slot is `{exercise_template_id, sets, superset_id?, rest_seconds?, n
 
 This is built for one person, and the design leans on that.
 
-- **Login:** a single password, compared in constant time. If `HEVY_MCP_PASSWORD` is empty, login is impossible rather than open. There is no rate limiting on the login form, so pick a long password and keep the server behind your proxy.
+- **Login:** a single password, compared in constant time, with brute-force lockout (5 failed attempts within 10 minutes returns `429 Too Many Requests`). If `HEVY_MCP_PASSWORD` is empty, login is impossible rather than open.
 - **Session cookie:** `HttpOnly`, `Secure` by default, `SameSite=lax` by default, valid for 30 days.
-- **Authorization codes:** random, single use, valid for 5 minutes, held in memory. PKCE is supported (`S256` and `plain`) and enforced whenever Claude sends a challenge. The post-login redirect only accepts same-site paths.
+- **Authorization codes:** random, single use, valid for 5 minutes, held in memory. Approval requires a valid session-bound CSRF token. PKCE `S256` is required (`plain` is rejected). The post-login redirect only accepts same-site paths.
 - **Access tokens:** HMAC-signed with a timestamp, valid for one year, accepted only in the `Authorization: Bearer` header, never in a query string. The browser cookie and the access token use different salts, so one cannot be replayed as the other.
 - **Agent token:** when `HEVY_MCP_AGENT_TOKEN` is set, that exact value is also accepted as a Bearer token on `/mcp/` and nowhere else, compared in constant time. It does not expire; remove or change the variable and restart to revoke it.
 - **Revocation:** tokens are stateless, so there is no per-token revoke. Rotating `HEVY_MCP_SESSION_SECRET` invalidates every token and session at once; Claude then has to reconnect. Changing `HEVY_MCP_CLIENT_ID` does the same.
@@ -219,10 +221,11 @@ Access tokens are stateless and survive restarts. MCP sessions live in memory: a
 | `GET`, `POST /login` | Password form and the session cookie. |
 | `GET`, `POST /logout` | Clears the cookie. |
 | `GET /.well-known/oauth-authorization-server` | OAuth metadata (RFC 8414). |
+| `GET /.well-known/oauth-protected-resource` | Protected resource metadata (RFC 9728). |
 | `GET /oauth/authorize` | Consent page; sends you to `/login` first if there is no session. |
-| `POST /oauth/authorize/approve` | Issues an authorization code. |
+| `POST /oauth/authorize/approve` | Issues an authorization code (CSRF-protected). |
 | `POST /oauth/token` | Exchanges the code for an access token. Accepts form or JSON bodies, and the client secret in the body or as HTTP Basic. |
-| `/mcp/` | The MCP endpoint. Requires `Authorization: Bearer <token>`. |
+| `/mcp`, `/mcp/` | The MCP endpoint. Requires `Authorization: Bearer <token>`. |
 
 ## Development
 
@@ -255,7 +258,7 @@ This project replaced a Python (FastMCP) implementation, and the Claude.ai conne
 
 - `src/tools.json` is the verbatim `tools/list` of the old server. Renaming a tool or editing a description or schema changes what Claude sees; treat it as a product decision.
 - Access tokens and the session cookie use the [itsdangerous](https://itsdangerous.palletsprojects.com) URL-safe timed format (HMAC-SHA1 over a key derived from the secret and a salt, salts `hevy-mcp-token` and `hevy-mcp-session`). Changing the format, a salt or the secret logs Claude out and the connector must be added again.
-- Routing reproduces the old framework's observable behaviour: JSON `404` and `405` bodies, `422` for missing form fields, a `307` from `/mcp` to `/mcp/`.
+- Routing reproduces the old framework's observable behaviour: JSON `404` and `405` bodies, `422` for missing form fields. Both `/mcp` and `/mcp/` are served directly.
 
 If you are starting fresh none of this constrains you, but changing any of it breaks existing installs.
 

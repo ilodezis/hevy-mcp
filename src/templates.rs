@@ -119,10 +119,12 @@ mod tests {
             ("redirect_domain", Some("x")),
             ("state", None),
             ("code_challenge", Some("abc")),
-            ("code_challenge_method", None),
+            ("code_challenge_method", Some("S256")),
+            ("csrf_token", Some("csrf-tok")),
         ]));
         assert!(ok.contains("name=\"state\" value=\"\""));
         assert!(ok.contains("name=\"code_challenge\" value=\"abc\""));
+        assert!(ok.contains("name=\"csrf_token\" value=\"csrf-tok\""));
         assert!(ok.contains("<span class=\"domain\">x</span>"));
         assert!(!ok.contains("Не получилось"));
     }

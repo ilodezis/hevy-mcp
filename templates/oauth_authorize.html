@@ -149,6 +149,7 @@
       <input type="hidden" name="state" value="{{ state or '' }}" />
       <input type="hidden" name="code_challenge" value="{{ code_challenge or '' }}" />
       <input type="hidden" name="code_challenge_method" value="{{ code_challenge_method or '' }}" />
+      <input type="hidden" name="csrf_token" value="{{ csrf_token or '' }}" />
       <button type="submit" autofocus>Разрешить доступ</button>
     </form>
     <p class="fine">Отключить можно в любой момент:<br />Claude&nbsp;→ Settings&nbsp;→ Connectors.<br />Клиент <code>{{ client_id }}</code> · <a href="/logout">Выйти</a></p>

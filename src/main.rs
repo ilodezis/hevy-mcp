@@ -76,10 +76,11 @@ async fn serve(cfg: Config, bind: SocketAddr) {
         // would require new configuration not present in existing deployments.
         .disable_allowed_hosts()
         .with_cancellation_token(shutdown.child_token());
+    let mcp_handler = HevyMcp::new(hevy.clone(), cfg.timezone);
     let mcp = StreamableHttpService::new(
         {
-            let hevy = hevy.clone();
-            move || Ok(HevyMcp::new(hevy.clone()))
+            let handler = mcp_handler.clone();
+            move || Ok(handler.clone())
         },
         Arc::new(sessions),
         mcp_config,

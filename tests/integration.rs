@@ -6,7 +6,7 @@
 //! and every tool, the same way Claude does.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs::{self, File},
     net::TcpListener,
     path::PathBuf,
@@ -83,6 +83,7 @@ struct MockState {
     seen: Mutex<Vec<Seen>>,
     reply: Mutex<(u16, Vec<u8>)>,
     routes: Mutex<HashMap<String, (u16, Vec<u8>)>>,
+    queue: Mutex<VecDeque<(u16, Vec<u8>)>>,
 }
 
 /// A tiny HTTP server standing in for api.hevyapp.com: it records every
@@ -98,6 +99,7 @@ impl Hevy {
             seen: Mutex::new(Vec::new()),
             reply: Mutex::new((200, b"{}".to_vec())),
             routes: Mutex::new(HashMap::new()),
+            queue: Mutex::new(VecDeque::new()),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind the mock");
         let url = format!("http://{}", listener.local_addr().expect("mock address"));
@@ -121,6 +123,22 @@ impl Hevy {
 
     fn reply_text(&self, status: u16, body: &str) {
         *self.state.reply.lock().expect("mock lock") = (status, body.as_bytes().to_vec());
+    }
+
+    fn reply_bytes(&self, status: u16, body: Vec<u8>) {
+        *self.state.reply.lock().expect("mock lock") = (status, body);
+    }
+
+    fn push_reply_text(&self, status: u16, body: &str) {
+        self.state.queue.lock().expect("mock lock").push_back((status, body.as_bytes().to_vec()));
+    }
+
+    fn push_reply_json(&self, status: u16, body: &Value) {
+        self.state
+            .queue
+            .lock()
+            .expect("mock lock")
+            .push_back((status, serde_json::to_vec(body).expect("JSON")));
     }
 
     /// The requests seen since the last call.
@@ -148,8 +166,10 @@ async fn mock_handler(State(state): State<Arc<MockState>>, req: Request) -> Resp
         Some(q) => format!("{}?{}", parts.uri.path(), q),
         None => parts.uri.path().to_string(),
     };
-    let route_reply = state.routes.lock().expect("mock lock").get(&full_path).cloned();
-    let (status, payload) = route_reply.unwrap_or_else(|| state.reply.lock().expect("mock lock").clone());
+    let queued = state.queue.lock().expect("mock lock").pop_front();
+    let (status, payload) = queued
+        .or_else(|| state.routes.lock().expect("mock lock").get(&full_path).cloned())
+        .unwrap_or_else(|| state.reply.lock().expect("mock lock").clone());
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
@@ -294,10 +314,10 @@ impl Server {
         };
         let deadline = Instant::now() + TIMEOUT;
         loop {
-            if let Ok(resp) = server.try_send(Call::get("/")).await {
-                if resp.status == 200 {
-                    return server;
-                }
+            if let Ok(resp) = server.try_send(Call::get("/")).await
+                && resp.status == 200
+            {
+                return server;
             }
             if let Some(status) = server.child.try_wait().expect("poll the server") {
                 let log = fs::read_to_string(server.dir.join("server.log")).unwrap_or_default();
@@ -533,6 +553,21 @@ fn cases() -> Vec<Case> {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
+fn assert_bearer_challenge(response: &Resp, expected_base: &str, context: &str) {
+    assert_eq!(
+        response.header("www-authenticate"),
+        format!("Bearer resource_metadata=\"{expected_base}/.well-known/oauth-protected-resource\""),
+        "{context}"
+    );
+}
+
+fn extract_csrf_token(html: &str) -> String {
+    let marker = "name=\"csrf_token\" value=\"";
+    let start = html.find(marker).expect("csrf_token hidden input in consent page") + marker.len();
+    let end = html[start..].find('"').expect("closing quote for csrf_token") + start;
+    html[start..end].to_string()
+}
+
 #[tokio::test]
 async fn health_and_auth_for_both_protocols() {
     let hevy = Hevy::start().await;
@@ -554,7 +589,7 @@ async fn health_and_auth_for_both_protocols() {
             }
             let response = server.send(call).await;
             assert_eq!(response.status, 401, "{version} {token:?}");
-            assert_eq!(response.header("www-authenticate"), "Bearer", "{version} {token:?}");
+            assert_bearer_challenge(&response, &server.base, &format!("{version} {token:?}"));
         }
     }
 
@@ -601,7 +636,7 @@ async fn agent_token_opens_the_mcp_endpoint() {
     for bearer in ["", "wrong", wrong_same_length.as_str(), wrong_prefix.as_str(), wrong_longer.as_str()] {
         let response = status_with_bearer(&server, bearer).await;
         assert_eq!(response.status, 401, "{bearer:?}");
-        assert_eq!(response.header("www-authenticate"), "Bearer", "{bearer:?}");
+        assert_bearer_challenge(&response, &server.base, bearer);
     }
 
     // The token is not a way into the login-gated pages, and no bearer is still 401.
@@ -621,7 +656,7 @@ async fn agent_token_unset_accepts_no_bearer() {
         for bearer in ["", AGENT_TOKEN, "null", "None"] {
             let response = status_with_bearer(server, bearer).await;
             assert_eq!(response.status, 401, "{bearer:?}");
-            assert_eq!(response.header("www-authenticate"), "Bearer", "{bearer:?}");
+            assert_bearer_challenge(&response, &server.base, bearer);
         }
     }
 }
@@ -799,8 +834,12 @@ async fn oauth_login_pkce_and_single_use_code() {
     assert_eq!(server.send(Call::post("/login").form(&[("password", PASSWORD)])).await.status, 303);
 
     // Signed in: the consent page, then approval hands back a code.
-    assert_eq!(server.send(Call::get(&authorize)).await.status, 200);
-    let approved = server.send(Call::post("/oauth/authorize/approve").form(&params)).await;
+    let consent = server.send(Call::get(&authorize)).await;
+    assert_eq!(consent.status, 200);
+    let csrf = extract_csrf_token(&consent.body);
+    let mut approve_params = params.to_vec();
+    approve_params.push(("csrf_token", csrf.as_str()));
+    let approved = server.send(Call::post("/oauth/authorize/approve").form(&approve_params)).await;
     assert_eq!(approved.status, 302);
     let (_, redirect_query) = approved.header("location").split_once('?').expect("redirect carries a query");
     let redirect: HashMap<String, String> = form_urlencoded::parse(redirect_query.as_bytes()).into_owned().collect();
@@ -840,15 +879,30 @@ async fn issued_credentials_use_the_signed_formats() {
     server.send(Call::post("/login").form(&[("password", PASSWORD)])).await;
     assert_eq!(session_serializer().loads(&server.cookie_value(), 60), Some(json!("owner")));
 
+    let verifier = "v".repeat(43);
+    let challenge = URL_SAFE_NO_PAD.encode(digest::digest(&digest::SHA256, verifier.as_bytes()));
     let consent = server
         .send(Call::get(&format!(
             "/oauth/authorize?{}",
-            query(&[("response_type", "code"), ("client_id", CLIENT_ID), ("redirect_uri", REDIRECT_URI)])
+            query(&[
+                ("response_type", "code"),
+                ("client_id", CLIENT_ID),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_challenge", challenge.as_str()),
+                ("code_challenge_method", "S256"),
+            ])
         )))
         .await;
     assert_eq!(consent.status, 200);
+    let csrf = extract_csrf_token(&consent.body);
     let approved = server
-        .send(Call::post("/oauth/authorize/approve").form(&[("client_id", CLIENT_ID), ("redirect_uri", REDIRECT_URI)]))
+        .send(Call::post("/oauth/authorize/approve").form(&[
+            ("client_id", CLIENT_ID),
+            ("redirect_uri", REDIRECT_URI),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+            ("csrf_token", csrf.as_str()),
+        ]))
         .await;
     assert_eq!(approved.status, 302);
     let (_, redirect_query) = approved.header("location").split_once('?').expect("redirect carries a query");
@@ -862,6 +916,7 @@ async fn issued_credentials_use_the_signed_formats() {
                     ("grant_type", "authorization_code"),
                     ("code", redirect["code"].as_str()),
                     ("redirect_uri", REDIRECT_URI),
+                    ("code_verifier", verifier.as_str()),
                 ]),
         )
         .await;
@@ -958,13 +1013,13 @@ async fn acceptance_revision_2026_07_28_discover_cache_scope_and_subscriptions_l
 
     while start.elapsed() < Duration::from_secs(2) {
         let frame_result = tokio::time::timeout(Duration::from_millis(500), incoming.frame()).await;
-        if let Ok(Some(Ok(frame))) = frame_result {
-            if let Some(data) = frame.data_ref() {
-                buffer.push_str(&String::from_utf8_lossy(data));
-                if buffer.contains("notifications/subscriptions/acknowledged") {
-                    ack_received = true;
-                    break;
-                }
+        if let Ok(Some(Ok(frame))) = frame_result
+            && let Some(data) = frame.data_ref()
+        {
+            buffer.push_str(&String::from_utf8_lossy(data));
+            if buffer.contains("notifications/subscriptions/acknowledged") {
+                ack_received = true;
+                break;
             }
         }
     }
@@ -1126,9 +1181,13 @@ async fn test_search_exercise_templates_russian_and_empty() {
     assert_eq!(tmpl_json["title_ru"], "Жим от груди (Тренажёр)");
     assert!(tmpl_json.get("thumbnail_url").is_none(), "thumbnail_url should be removed");
 
-    // 4. an upstream failure is an MCP error, not "nothing found"
-    hevy.reply_text(401, "{\"error\": \"Invalid api key\"}");
-    let failed = mcp.call_tool("search_exercise_templates", json!({"query": "bench"})).await;
+    // 4. an upstream failure on a cold cache is an MCP error, not "nothing found"
+    let cold_hevy = Hevy::start().await;
+    cold_hevy.reply_text(401, "{\"error\": \"Invalid api key\"}");
+    let cold_server = Server::start(&cold_hevy.url, API_KEY).await;
+    let mut cold_mcp = Mcp::new(&cold_server, &mint_token(CLIENT_ID));
+    cold_mcp.connect(false).await;
+    let failed = cold_mcp.call_tool("search_exercise_templates", json!({"query": "bench"})).await;
     assert!(failed["isError"].as_bool().unwrap_or(false), "{failed}");
 }
 
@@ -1295,7 +1354,7 @@ async fn test_list_workouts_and_routines_summary_mode() {
     assert_eq!(w1["id"], "w1");
     assert_eq!(w1["title"], "Chest & Triceps");
     assert_eq!(w1["start_time"], "2026-08-04T13:33:10Z");
-    assert_eq!(w1["start_time_local"], "2026-08-04T16:33:10+03:00");
+    assert_eq!(w1["start_time_local"], "2026-08-04T13:33:10+00:00");
     assert_eq!(w1["duration_min"], 55);
     assert_eq!(w1["exercises_count"], 1);
     assert_eq!(w1["volume_kg"], 1120.0);
@@ -1615,4 +1674,520 @@ async fn test_output_schema_contract_for_all_read_tools() {
         let errors: Vec<String> = validator.iter_errors(structured).map(|e| e.to_string()).collect();
         assert!(errors.is_empty(), "tool {name} output failed outputSchema validation:\nSchema: {output_schema}\nPayload: {structured}\nErrors: {errors:?}");
     }
+}
+
+#[tokio::test]
+async fn test_timezone_and_multiday_duration() {
+    let hevy = Hevy::start().await;
+    let server = Server::start_with(&hevy.url, API_KEY, &[("TIMEZONE", "Europe/Chisinau")]).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    hevy.route_json(
+        "/v1/workouts?page=1&pageSize=10",
+        200,
+        &json!({
+            "page": 1,
+            "page_count": 1,
+            "workouts": [
+                {
+                    "id": "w_summer",
+                    "title": "Summer",
+                    "start_time": "2026-08-04T13:33:10Z",
+                    "end_time": "2026-08-05T14:33:10Z",
+                    "exercises": []
+                },
+                {
+                    "id": "w_winter",
+                    "title": "Winter",
+                    "start_time": "2026-01-15T13:33:10Z",
+                    "end_time": "2026-01-15T14:18:10Z",
+                    "exercises": []
+                }
+            ]
+        }),
+    );
+
+    let res = mcp.call_tool("list_workouts", json!({})).await;
+    assert!(!res["isError"].as_bool().unwrap_or(false));
+    let payload = tool_json(&res);
+    assert_eq!(payload["workouts"][0]["start_time_local"], "2026-08-04T16:33:10+03:00");
+    assert_eq!(payload["workouts"][0]["duration_min"], 25 * 60);
+    assert_eq!(payload["workouts"][1]["start_time_local"], "2026-01-15T15:33:10+02:00");
+    assert_eq!(payload["workouts"][1]["duration_min"], 45);
+
+    // Invalid TIMEZONE fails startup clearly.
+    let dir = std::env::temp_dir().join(format!("hevy-mcp-it-bad-tz-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("scratch directory");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hevy-mcp"));
+    command.current_dir(&dir).env_clear();
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", root);
+    }
+    let output = command
+        .env("HEVY_MCP_SESSION_SECRET", SECRET)
+        .env("TIMEZONE", "Invalid/Zone")
+        .output()
+        .expect("run hevy-mcp");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("TIMEZONE"), "{stderr}");
+}
+
+#[tokio::test]
+async fn test_template_catalog_cache_and_invalidation() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    hevy.route_json(
+        "/v1/exercise_templates?page=1&pageSize=100",
+        200,
+        &json!({
+            "page": 1,
+            "page_count": 1,
+            "exercise_templates": [
+                {
+                    "id": "bench_1",
+                    "title": "Bench Press",
+                    "type": "weight_reps",
+                    "primary_muscle_group": "chest",
+                    "equipment": "barbell",
+                    "is_custom": false
+                },
+                {
+                    "id": "grav_1",
+                    "title": "Assisted Dip",
+                    "type": "bodyweight_assisted_reps",
+                    "primary_muscle_group": "triceps",
+                    "equipment": "machine",
+                    "is_custom": false
+                }
+            ]
+        }),
+    );
+
+    // 1. First search populates the catalog cache (1 HTTP call).
+    hevy.take();
+    let res1 = mcp.call_tool("search_exercise_templates", json!({"query": "bench"})).await;
+    assert_eq!(tool_json(&res1).as_array().map(Vec::len), Some(1));
+    assert_eq!(hevy.take().len(), 1);
+
+    // 2. Second search hits the in-memory catalog (0 HTTP calls).
+    let res2 = mcp.call_tool("search_exercise_templates", json!({"query": "dip"})).await;
+    assert_eq!(tool_json(&res2).as_array().map(Vec::len), Some(1));
+    assert!(hevy.take().is_empty(), "cached search should not hit Hevy");
+
+    // 3. list_workouts resolves is_assisted from the cached catalog with zero template HTTP calls.
+    hevy.route_json(
+        "/v1/workouts?page=1&pageSize=10",
+        200,
+        &json!({
+            "page": 1,
+            "page_count": 1,
+            "workouts": [{
+                "id": "w1",
+                "title": "Upper",
+                "start_time": "2026-08-04T10:00:00Z",
+                "end_time": "2026-08-04T11:00:00Z",
+                "exercises": [
+                    {
+                        "exercise_template_id": "bench_1",
+                        "title": "Bench Press",
+                        "sets": [{"weight_kg": 80.0, "reps": 5}]
+                    },
+                    {
+                        "exercise_template_id": "grav_1",
+                        "title": "Assisted Dip",
+                        "sets": [{"weight_kg": 25.0, "reps": 10}]
+                    }
+                ]
+            }]
+        }),
+    );
+    let lw = mcp.call_tool("list_workouts", json!({})).await;
+    let lw_seen = hevy.take();
+    assert_eq!(lw_seen.len(), 1, "list_workouts should only fetch /v1/workouts");
+    assert_eq!(lw_seen[0].path, "/v1/workouts");
+    assert_eq!(tool_json(&lw)["workouts"][0]["volume_kg"], json!(400.0));
+
+    // 4. create_exercise_template invalidates the catalog cache.
+    hevy.reply_json(200, &json!({"id": "custom_1", "title": "Custom Lift"}));
+    let created = mcp
+        .call_tool(
+            "create_exercise_template",
+            json!({
+                "title": "Custom Lift",
+                "exercise_type": "weight_reps",
+                "equipment_category": "dumbbell",
+                "muscle_group": "chest"
+            }),
+        )
+        .await;
+    assert!(!created["isError"].as_bool().unwrap_or(false));
+    hevy.take();
+
+    let res3 = mcp.call_tool("search_exercise_templates", json!({"query": "bench"})).await;
+    assert_eq!(tool_json(&res3).as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        hevy.take().iter().filter(|s| s.path == "/v1/exercise_templates").count(),
+        1,
+        "catalog must refresh after create_exercise_template"
+    );
+}
+
+#[tokio::test]
+async fn test_server_instructions_and_tool_annotations() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+
+    // Legacy initialize returns instructions.
+    let init = server
+        .send(
+            Call::post("/mcp/")
+                .header("authorization", format!("Bearer {}", mint_token(CLIENT_ID)))
+                .header("accept", ACCEPT)
+                .header("mcp-protocol-version", LEGACY)
+                .json(&json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": LEGACY, "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1"}
+                    }
+                })),
+        )
+        .await
+        .rpc_payload();
+    let instructions = init["result"]["instructions"].as_str().expect("instructions in initialize");
+    assert!(instructions.contains("search_exercise_templates"), "{instructions}");
+    assert!(instructions.contains("get_exercise_history"), "{instructions}");
+
+    // Modern server/discover also carries instructions.
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(true).await;
+    let discover = mcp.rpc("server/discover", json!({})).await;
+    let disc_instr = discover["instructions"].as_str().expect("instructions in discover");
+    assert!(disc_instr.contains("search_exercise_templates"), "{disc_instr}");
+
+    // All 17 tools carry accurate annotations.
+    let listed = mcp.rpc("tools/list", json!({})).await;
+    let tools = listed["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 17);
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        let ann = &tool["annotations"];
+        assert!(ann.is_object(), "{name} missing annotations");
+        match name {
+            "update_routine" | "update_workout" => {
+                assert_eq!(ann["readOnlyHint"], false, "{name}");
+                assert_eq!(ann["destructiveHint"], true, "{name}");
+                assert_eq!(ann["idempotentHint"], true, "{name}");
+                assert_eq!(ann["openWorldHint"], false, "{name}");
+            }
+            "create_routine" | "create_routine_folder" | "create_workout" | "create_exercise_template" => {
+                assert_eq!(ann["readOnlyHint"], false, "{name}");
+                assert_eq!(ann["destructiveHint"], false, "{name}");
+                assert_eq!(ann["idempotentHint"], false, "{name}");
+                assert_eq!(ann["openWorldHint"], false, "{name}");
+            }
+            _ => {
+                assert_eq!(ann["readOnlyHint"], true, "{name}");
+                assert_eq!(ann["destructiveHint"], false, "{name}");
+                assert_eq!(ann["idempotentHint"], true, "{name}");
+                assert_eq!(ann["openWorldHint"], false, "{name}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_update_routine_and_workout_preserve_omitted_exercises() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // 1. update_routine without exercises preserves existing exercises and notes.
+    hevy.route_json(
+        "/v1/routines/r_keep",
+        200,
+        &json!({
+            "routine": {
+                "id": "r_keep",
+                "title": "Old Routine",
+                "notes": "Keep these notes",
+                "exercises": [{
+                    "index": 0,
+                    "title": "Bench Press",
+                    "exercise_template_id": "bench_1",
+                    "superset_id": 2,
+                    "rest_seconds": 120,
+                    "notes": "Pause at bottom",
+                    "sets": [{"index": 0, "type": "normal", "weight_kg": 80.0, "reps": 5}]
+                }]
+            }
+        }),
+    );
+    hevy.take();
+    let r_res = mcp
+        .call_tool("update_routine", json!({"routine_id": "r_keep", "title": "Renamed Routine"}))
+        .await;
+    assert!(!r_res["isError"].as_bool().unwrap_or(false), "{r_res}");
+    let r_seen = hevy.take();
+    assert_eq!(r_seen.len(), 2);
+    assert_eq!((r_seen[0].method.as_str(), r_seen[0].path.as_str()), ("GET", "/v1/routines/r_keep"));
+    assert_eq!((r_seen[1].method.as_str(), r_seen[1].path.as_str()), ("PUT", "/v1/routines/r_keep"));
+    let r_put: Value = serde_json::from_slice(&r_seen[1].body).expect("routine PUT JSON");
+    assert_eq!(r_put["routine"]["title"], "Renamed Routine");
+    assert_eq!(r_put["routine"]["notes"], "Keep these notes");
+    assert_eq!(r_put["routine"]["exercises"][0]["exercise_template_id"], "bench_1");
+    assert_eq!(r_put["routine"]["exercises"][0]["rest_seconds"], 120);
+    assert_eq!(r_put["routine"]["exercises"][0]["superset_id"], 2);
+    assert!(r_put["routine"]["exercises"][0].get("index").is_none());
+    assert_eq!(r_put["routine"]["exercises"][0]["sets"][0]["weight_kg"], 80.0);
+
+    // 2. update_workout with exercises omitted (or null) preserves existing exercises, is_private, description.
+    hevy.route_json(
+        "/v1/workouts/w_keep",
+        200,
+        &json!({
+            "workout": {
+                "id": "w_keep",
+                "title": "Old Workout",
+                "description": "Original desc",
+                "is_private": true,
+                "start_time": "2026-09-01T10:00:00Z",
+                "end_time": "2026-09-01T11:00:00Z",
+                "exercises": [{
+                    "index": 0,
+                    "title": "Squat",
+                    "exercise_template_id": "squat_1",
+                    "notes": "Deep",
+                    "sets": [{"index": 0, "type": "warmup", "weight_kg": 60.0, "reps": 8, "rpe": 7.0}]
+                }]
+            }
+        }),
+    );
+    hevy.take();
+    let w_res = mcp
+        .call_tool(
+            "update_workout",
+            json!({
+                "workout_id": "w_keep",
+                "title": "Renamed Workout",
+                "start_time": "2026-09-01T10:00:00Z",
+                "end_time": "2026-09-01T11:00:00Z",
+                "exercises": null
+            }),
+        )
+        .await;
+    assert!(!w_res["isError"].as_bool().unwrap_or(false), "{w_res}");
+    let w_seen = hevy.take();
+    assert_eq!(w_seen.len(), 2);
+    assert_eq!((w_seen[0].method.as_str(), w_seen[0].path.as_str()), ("GET", "/v1/workouts/w_keep"));
+    assert_eq!((w_seen[1].method.as_str(), w_seen[1].path.as_str()), ("PUT", "/v1/workouts/w_keep"));
+    let w_put: Value = serde_json::from_slice(&w_seen[1].body).expect("workout PUT JSON");
+    assert_eq!(w_put["workout"]["title"], "Renamed Workout");
+    assert_eq!(w_put["workout"]["description"], "Original desc");
+    assert_eq!(w_put["workout"]["is_private"], true);
+    assert_eq!(w_put["workout"]["exercises"][0]["exercise_template_id"], "squat_1");
+    assert_eq!(w_put["workout"]["exercises"][0]["sets"][0]["rpe"], 7.0);
+    assert_eq!(w_put["workout"]["exercises"][0]["sets"][0]["type"], "warmup");
+}
+
+#[tokio::test]
+async fn test_mcp_both_paths_no_redirect_and_rfc9728_and_public_url() {
+    let hevy = Hevy::start().await;
+    let server = Server::start_with(&hevy.url, API_KEY, &[("PUBLIC_URL", "https://mcp.example.com/")]).await;
+
+    // 1. /mcp serves directly (no 307 redirect): 401 when unauthenticated, 200 when authenticated.
+    let unauth = server
+        .send(
+            Call::post("/mcp")
+                .header("accept", ACCEPT)
+                .header("mcp-protocol-version", MODERN)
+                .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})),
+        )
+        .await;
+    assert_eq!(unauth.status, 401);
+    assert_bearer_challenge(&unauth, "https://mcp.example.com", "/mcp 401");
+
+    let token = mint_token(CLIENT_ID);
+    let auth_no_slash = server
+        .send(
+            Call::post("/mcp")
+                .header("authorization", format!("Bearer {token}"))
+                .header("accept", ACCEPT)
+                .header("mcp-protocol-version", MODERN)
+                .header("mcp-method", "tools/list")
+                .json(&json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                    "params": {"_meta": {
+                        "io.modelcontextprotocol/protocolVersion": MODERN,
+                        "io.modelcontextprotocol/clientCapabilities": {},
+                    }}
+                })),
+        )
+        .await;
+    assert_eq!(auth_no_slash.status, 200, "{}", auth_no_slash.body);
+
+    // 2. RFC 9728 protected resource metadata + RFC 8414 metadata honor PUBLIC_URL.
+    let prm = server.send(Call::get("/.well-known/oauth-protected-resource")).await;
+    assert_eq!(prm.status, 200);
+    let prm_json = prm.json();
+    assert_eq!(prm_json["resource"], "https://mcp.example.com/mcp");
+    assert_eq!(prm_json["authorization_servers"], json!(["https://mcp.example.com"]));
+    assert_eq!(prm_json["bearer_methods_supported"], json!(["header"]));
+
+    let as_meta = server.send(Call::get("/.well-known/oauth-authorization-server")).await.json();
+    assert_eq!(as_meta["issuer"], "https://mcp.example.com");
+    assert_eq!(as_meta["code_challenge_methods_supported"], json!(["S256"]));
+}
+
+#[tokio::test]
+async fn test_oauth_hardening_s256_only_csrf_and_login_lockout() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+
+    // 1. Brute-force lockout on POST /login (5 failures -> 6th returns 429 even with right password).
+    for _ in 0..5 {
+        let resp = server.send(Call::post("/login").form(&[("password", "wrong")])).await;
+        assert_eq!(resp.status, 401);
+    }
+    let locked = server.send(Call::post("/login").form(&[("password", PASSWORD)])).await;
+    assert_eq!(locked.status, 429);
+    assert!(!locked.header("retry-after").is_empty());
+
+    // Different forwarded client IP is not locked out and can log in.
+    let ok = server
+        .send(
+            Call::post("/login")
+                .header("x-forwarded-for", "203.0.113.42")
+                .form(&[("password", PASSWORD)]),
+        )
+        .await;
+    assert_eq!(ok.status, 303);
+
+    // 2. plain PKCE and missing code_challenge are rejected on GET /oauth/authorize.
+    let plain_auth = server
+        .send(Call::get(&format!(
+            "/oauth/authorize?{}",
+            query(&[
+                ("response_type", "code"),
+                ("client_id", CLIENT_ID),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_challenge", "plain-challenge"),
+                ("code_challenge_method", "plain"),
+            ])
+        )))
+        .await;
+    assert_eq!(plain_auth.status, 400);
+    assert!(!plain_auth.body.contains("<form"));
+
+    let no_pkce = server
+        .send(Call::get(&format!(
+            "/oauth/authorize?{}",
+            query(&[
+                ("response_type", "code"),
+                ("client_id", CLIENT_ID),
+                ("redirect_uri", REDIRECT_URI),
+            ])
+        )))
+        .await;
+    assert_eq!(no_pkce.status, 400);
+
+    // 3. CSRF token verification on POST /oauth/authorize/approve.
+    let verifier = "z".repeat(43);
+    let challenge = URL_SAFE_NO_PAD.encode(digest::digest(&digest::SHA256, verifier.as_bytes()));
+    let consent = server
+        .send(Call::get(&format!(
+            "/oauth/authorize?{}",
+            query(&[
+                ("response_type", "code"),
+                ("client_id", CLIENT_ID),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_challenge", challenge.as_str()),
+                ("code_challenge_method", "S256"),
+            ])
+        )))
+        .await;
+    assert_eq!(consent.status, 200);
+    let csrf = extract_csrf_token(&consent.body);
+
+    // Missing CSRF token -> 403
+    let missing_csrf = server
+        .send(Call::post("/oauth/authorize/approve").form(&[
+            ("client_id", CLIENT_ID),
+            ("redirect_uri", REDIRECT_URI),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+        ]))
+        .await;
+    assert_eq!(missing_csrf.status, 403);
+
+    // Tampered CSRF token -> 403
+    let bad_csrf = server
+        .send(Call::post("/oauth/authorize/approve").form(&[
+            ("client_id", CLIENT_ID),
+            ("redirect_uri", REDIRECT_URI),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+            ("csrf_token", "tampered.token.value"),
+        ]))
+        .await;
+    assert_eq!(bad_csrf.status, 403);
+
+    // Valid CSRF token with plain method -> 400
+    let plain_approve = server
+        .send(Call::post("/oauth/authorize/approve").form(&[
+            ("client_id", CLIENT_ID),
+            ("redirect_uri", REDIRECT_URI),
+            ("code_challenge", "plain-challenge"),
+            ("code_challenge_method", "plain"),
+            ("csrf_token", csrf.as_str()),
+        ]))
+        .await;
+    assert_eq!(plain_approve.status, 400);
+}
+
+#[tokio::test]
+async fn test_hevy_client_retry_and_body_cap() {
+    let hevy = Hevy::start().await;
+    let server = Server::start(&hevy.url, API_KEY).await;
+    let mut mcp = Mcp::new(&server, &mint_token(CLIENT_ID));
+    mcp.connect(false).await;
+
+    // 1. Transient 429 then 503 on GET succeeds on the 3rd attempt.
+    hevy.push_reply_text(429, "rate limited");
+    hevy.push_reply_text(503, "upstream busy");
+    hevy.push_reply_json(200, &json!({"workout_count": 77}));
+    hevy.take();
+    let ok = mcp.call_tool("workout_count", json!({})).await;
+    assert!(!ok["isError"].as_bool().unwrap_or(false), "{ok}");
+    assert_eq!(tool_json(&ok), json!({"workout_count": 77}));
+    assert_eq!(hevy.take().len(), 3);
+
+    // 2. Persistent 503 on GET stops after 3 attempts and returns error.
+    hevy.reply_text(503, "down");
+    hevy.take();
+    let fail = mcp.call_tool("workout_count", json!({})).await;
+    assert_eq!(fail["isError"], true);
+    assert_eq!(tool_json(&fail), json!({"error": "Hevy API returned 503: down"}));
+    assert_eq!(hevy.take().len(), 3);
+
+    // 3. POST does NOT retry on 503.
+    hevy.reply_text(503, "post failed");
+    hevy.take();
+    let post_fail = mcp.call_tool("create_routine_folder", json!({"title": "X"})).await;
+    assert_eq!(post_fail["isError"], true);
+    assert_eq!(hevy.take().len(), 1);
+
+    // 4. Response larger than 16 MB is rejected.
+    hevy.reply_bytes(200, vec![b'a'; 16 * 1024 * 1024 + 1024]);
+    let too_big = mcp.call_tool("workout_count", json!({})).await;
+    assert_eq!(too_big["isError"], true);
+    let msg = tool_json(&too_big)["error"].as_str().unwrap_or_default().to_string();
+    assert!(msg.contains("byte limit"), "{msg}");
 }

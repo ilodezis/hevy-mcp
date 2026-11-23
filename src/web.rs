@@ -37,17 +37,23 @@ use crate::{
 
 const SESSION_COOKIE: &str = "hevy_mcp_session";
 const CODE_TTL: Duration = Duration::from_secs(300);
+const CSRF_TTL: u64 = 15 * 60;
+const LOGIN_MAX_FAILURES: usize = 5;
+const LOGIN_WINDOW: Duration = Duration::from_secs(10 * 60);
+const LOGIN_TRACK_CAP: usize = 10_000;
 const MAX_FORM_BYTES: usize = 1024 * 1024;
 
 pub struct App {
     pub cfg: Config,
     pub hevy: Arc<HevyClient>,
     pub mcp: StreamableHttpService<HevyMcp, LocalSessionManager>,
-    /// Browser session cookie and MCP access token share the secret under
-    /// different salts, so neither can be replayed as the other.
+    /// Browser session cookie, CSRF token, and MCP access token share the secret
+    /// under different salts, so none can be replayed as another.
     session: Serializer,
+    csrf: Serializer,
     token: Serializer,
     codes: Mutex<HashMap<String, (Instant, CodeData)>>,
+    login_failures: Mutex<HashMap<String, Vec<Instant>>>,
     rng: SystemRandom,
     /// Where we listen: the authority for `base_url` when a request has no `Host`.
     local_addr: SocketAddr,
@@ -56,8 +62,8 @@ pub struct App {
 #[derive(Clone)]
 struct CodeData {
     redirect_uri: String,
-    code_challenge: Option<String>,
-    code_challenge_method: Option<String>,
+    code_challenge: String,
+    code_challenge_method: String,
 }
 
 impl App {
@@ -69,20 +75,72 @@ impl App {
     ) -> Self {
         Self {
             session: Serializer::new(&cfg.session_secret, "hevy-mcp-session"),
+            csrf: Serializer::new(&cfg.session_secret, "hevy-mcp-csrf"),
             token: Serializer::new(&cfg.session_secret, "hevy-mcp-token"),
             cfg,
             hevy,
             mcp,
             codes: Mutex::new(HashMap::new()),
+            login_failures: Mutex::new(HashMap::new()),
             rng: SystemRandom::new(),
             local_addr,
         }
     }
 
+    fn read_session_cookie(&self, headers: &HeaderMap) -> Option<String> {
+        let raw = cookie(headers, SESSION_COOKIE)?;
+        let payload = self.session.loads(&raw, self.cfg.session_ttl)?;
+        payload.is_string().then_some(raw)
+    }
+
     fn read_session(&self, headers: &HeaderMap) -> bool {
-        cookie(headers, SESSION_COOKIE)
-            .and_then(|token| self.session.loads(&token, self.cfg.session_ttl))
-            .is_some_and(|payload| payload.is_string())
+        self.read_session_cookie(headers).is_some()
+    }
+
+    fn mint_csrf(&self, session_cookie: &str) -> String {
+        self.csrf.dumps(&json!(session_csrf_tag(session_cookie)))
+    }
+
+    fn verify_csrf(&self, session_cookie: &str, token: &str) -> bool {
+        self.csrf
+            .loads(token, CSRF_TTL)
+            .is_some_and(|payload| payload.as_str() == Some(&session_csrf_tag(session_cookie)))
+    }
+
+    fn login_locked_until(&self, ip: &str) -> Option<u64> {
+        let now = Instant::now();
+        let mut map = self.login_failures.lock().expect("login failure lock");
+        let entries = map.get_mut(ip)?;
+        entries.retain(|t| now.saturating_duration_since(*t) < LOGIN_WINDOW);
+        if entries.is_empty() {
+            map.remove(ip);
+            return None;
+        }
+        if entries.len() >= LOGIN_MAX_FAILURES {
+            let oldest = entries[0];
+            let remaining = LOGIN_WINDOW.saturating_sub(now.saturating_duration_since(oldest));
+            Some(remaining.as_secs().max(1))
+        } else {
+            None
+        }
+    }
+
+    fn record_login_failure(&self, ip: &str) {
+        let now = Instant::now();
+        let mut map = self.login_failures.lock().expect("login failure lock");
+        if map.len() >= LOGIN_TRACK_CAP && !map.contains_key(ip) {
+            map.retain(|_, v| {
+                v.retain(|t| now.saturating_duration_since(*t) < LOGIN_WINDOW);
+                !v.is_empty()
+            });
+        }
+        let entries = map.entry(ip.to_string()).or_default();
+        entries.retain(|t| now.saturating_duration_since(*t) < LOGIN_WINDOW);
+        entries.push(now);
+    }
+
+    fn clear_login_failures(&self, ip: &str) {
+        self.login_failures.lock().expect("login failure lock").remove(ip);
     }
 
     fn token_valid(&self, token: &str) -> bool {
@@ -124,6 +182,10 @@ impl App {
 /// `secrets.compare_digest`: constant time for equal lengths.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn session_csrf_tag(session_cookie: &str) -> String {
+    URL_SAFE_NO_PAD.encode(digest::digest(&digest::SHA256, session_cookie.as_bytes()))
 }
 
 // ── Responses ────────────────────────────────────────────────────────────────
@@ -241,9 +303,12 @@ fn form_field(form: &HashMap<String, String>, name: &str) -> Option<String> {
     form.get(name).filter(|v| !v.is_empty()).cloned()
 }
 
-/// `request.base_url` behind uvicorn's `--proxy-headers --forwarded-allow-ips *`:
-/// scheme from `X-Forwarded-Proto`, authority from `Host`.
-fn base_url(headers: &HeaderMap, local: SocketAddr) -> String {
+/// Resolve the public origin: explicit `PUBLIC_URL` if configured, otherwise
+/// scheme from `X-Forwarded-Proto` and authority from `Host` (or `local`).
+fn base_url(cfg: &Config, headers: &HeaderMap, local: SocketAddr) -> String {
+    if let Some(ref public) = cfg.public_url {
+        return public.clone();
+    }
     let scheme = headers
         .get_all("x-forwarded-proto")
         .iter()
@@ -258,6 +323,20 @@ fn base_url(headers: &HeaderMap, local: SocketAddr) -> String {
         .map(String::from)
         .unwrap_or_else(|| local.to_string());
     format!("{scheme}://{host}")
+}
+
+fn client_ip(headers: &HeaderMap, peer: SocketAddr) -> String {
+    if peer.ip().is_loopback()
+        && let Some(forwarded) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    {
+        return forwarded.to_string();
+    }
+    peer.ip().to_string()
 }
 
 /// Confine the post-login redirect to a same-site path (open-redirect guard).
@@ -319,11 +398,13 @@ fn hex(b: u8) -> Option<u8> {
 
 // ── Routing ──────────────────────────────────────────────────────────────────
 
-/// Routes in the order the FastAPI app registered them, with their methods.
+/// Routes registered on the HTTP server, with their supported methods.
 const ROUTES: &[(&str, &[Method])] = &[
     ("/login", &[Method::GET, Method::POST]),
     ("/logout", &[Method::GET, Method::POST]),
     ("/.well-known/oauth-authorization-server", &[Method::GET]),
+    ("/.well-known/oauth-protected-resource", &[Method::GET]),
+    ("/.well-known/oauth-protected-resource/mcp", &[Method::GET]),
     ("/oauth/authorize", &[Method::GET]),
     ("/oauth/authorize/approve", &[Method::POST]),
     ("/oauth/token", &[Method::POST]),
@@ -331,7 +412,7 @@ const ROUTES: &[(&str, &[Method])] = &[
 ];
 
 fn is_mcp_path(path: &str) -> bool {
-    path.starts_with("/mcp/")
+    path == "/mcp" || path.starts_with("/mcp/")
 }
 
 fn route_exists(path: &str) -> bool {
@@ -346,14 +427,8 @@ pub async fn handle(
     let started = Instant::now();
     let method = req.method().clone();
     let raw_path = req.uri().path().to_string();
-    let client = req
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|v| v.trim().to_string())
-        .unwrap_or_else(|| peer.ip().to_string());
-    let resp = route(&app, req).await;
+    let client = client_ip(req.headers(), peer);
+    let resp = route(&app, &client, req).await;
     eprintln!(
         "INFO: {client} - \"{method} {raw_path}\" {} ({} ms)",
         resp.status().as_u16(),
@@ -362,7 +437,7 @@ pub async fn handle(
     Ok(resp)
 }
 
-async fn route(app: &App, req: Request) -> Response {
+async fn route(app: &App, client: &str, req: Request) -> Response {
     let path = percent_decode_path(req.uri().path());
     let method = req.method().clone();
     if is_mcp_path(&path) {
@@ -371,9 +446,17 @@ async fn route(app: &App, req: Request) -> Response {
     let local = app.local_addr;
     match (path.as_str(), method.clone()) {
         ("/login", Method::GET) => login_page(app, req),
-        ("/login", Method::POST) => login(app, req).await,
+        ("/login", Method::POST) => login(app, client, req).await,
         ("/logout", Method::GET | Method::POST) => logout(),
-        ("/.well-known/oauth-authorization-server", Method::GET) => oauth_metadata(req.headers(), local),
+        ("/.well-known/oauth-authorization-server", Method::GET) => {
+            oauth_metadata(&app.cfg, req.headers(), local)
+        }
+        (
+            "/.well-known/oauth-protected-resource"
+            | "/.well-known/oauth-protected-resource/mcp"
+            | "/.well-known/oauth-protected-resource/mcp/",
+            Method::GET,
+        ) => oauth_protected_resource(&app.cfg, req.headers(), local),
         ("/oauth/authorize", Method::GET) => oauth_authorize(app, req),
         ("/oauth/authorize/approve", Method::POST) => oauth_approve(app, req).await,
         ("/oauth/token", Method::POST) => oauth_token(app, req).await,
@@ -392,7 +475,7 @@ async fn route(app: &App, req: Request) -> Response {
                     None => format!("{path}/"),
                 };
                 if route_exists(&toggled) {
-                    let mut url = format!("{}{}", base_url(req.headers(), local), toggled);
+                    let mut url = format!("{}{}", base_url(&app.cfg, req.headers(), local), toggled);
                     if let Some(q) = req.uri().query() {
                         url.push('?');
                         url.push_str(q);
@@ -432,10 +515,13 @@ async fn mcp_endpoint(app: &App, req: Request, path: &str) -> Response {
         .map(|_| &auth[7..]);
     if !token.is_some_and(|t| !t.is_empty() && (app.token_valid(t) || app.agent_token_valid(t))) {
         let mut resp = detail(StatusCode::UNAUTHORIZED, "Unauthorized. Invalid or missing MCP access token.");
-        resp.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        let base = base_url(&app.cfg, req.headers(), app.local_addr);
+        let challenge = format!("Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\"");
+        let value = HeaderValue::from_str(&challenge).unwrap_or_else(|_| HeaderValue::from_static("Bearer"));
+        resp.headers_mut().insert(header::WWW_AUTHENTICATE, value);
         return resp;
     }
-    if path != "/mcp/" {
+    if path != "/mcp" && path != "/mcp/" {
         return response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "Not Found");
     }
     app.mcp.handle(req).await.map(Body::new)
@@ -452,19 +538,31 @@ fn login_page(app: &App, req: Request) -> Response {
     html(StatusCode::OK, templates::login(None, &next))
 }
 
-async fn login(app: &App, req: Request) -> Response {
+async fn login(app: &App, client: &str, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let form = form(&parts.headers, body).await;
     let Some(password) = form_field(&form, "password") else {
         return missing_fields("body", &["password"]);
     };
     let next = safe_next(form_field(&form, "next").as_deref());
+    if let Some(retry_after) = app.login_locked_until(client) {
+        let mut resp = html(
+            StatusCode::TOO_MANY_REQUESTS,
+            templates::login(Some("Слишком много неудачных попыток входа. Попробуй позже."), &next),
+        );
+        if let Ok(val) = HeaderValue::from_str(&retry_after.to_string()) {
+            resp.headers_mut().insert(header::RETRY_AFTER, val);
+        }
+        return resp;
+    }
     let cfg = &app.cfg;
     let ok = !cfg.auth_password.is_empty()
         && ct_eq(password.as_bytes(), cfg.auth_password.as_bytes());
     if !ok {
+        app.record_login_failure(client);
         return html(StatusCode::UNAUTHORIZED, templates::login(Some("Неверный пароль"), &next));
     }
+    app.clear_login_failures(client);
     let mut resp = redirect(StatusCode::SEE_OTHER, &next);
     let session = app.session.dumps(&json!("owner"));
     set_cookie(&mut resp, &session, cfg.session_ttl, cfg.cookie_secure, true, &cfg.cookie_samesite);
@@ -479,8 +577,8 @@ fn logout() -> Response {
 
 // ── OAuth 2.0 authorization server ───────────────────────────────────────────
 
-fn oauth_metadata(headers: &HeaderMap, local: SocketAddr) -> Response {
-    let base = base_url(headers, local);
+fn oauth_metadata(cfg: &Config, headers: &HeaderMap, local: SocketAddr) -> Response {
+    let base = base_url(cfg, headers, local);
     json_response(
         StatusCode::OK,
         json!({
@@ -490,7 +588,19 @@ fn oauth_metadata(headers: &HeaderMap, local: SocketAddr) -> Response {
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code"],
             "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
-            "code_challenge_methods_supported": ["S256", "plain"],
+            "code_challenge_methods_supported": ["S256"],
+        }),
+    )
+}
+
+fn oauth_protected_resource(cfg: &Config, headers: &HeaderMap, local: SocketAddr) -> Response {
+    let base = base_url(cfg, headers, local);
+    json_response(
+        StatusCode::OK,
+        json!({
+            "resource": format!("{base}/mcp"),
+            "authorization_servers": [base],
+            "bearer_methods_supported": ["header"],
         }),
     )
 }
@@ -519,9 +629,18 @@ fn oauth_authorize(app: &App, req: Request) -> Response {
     if !cfg.mcp_redirect_uris.iter().any(|u| u == redirect_uri) {
         return html(StatusCode::OK, error_page("redirect_uri не в списке разрешённых."));
     }
+    let Some(code_challenge) = q.get("code_challenge").map(String::as_str).filter(|s| !s.is_empty()) else {
+        return html(StatusCode::BAD_REQUEST, error_page("Требуется PKCE (code_challenge)."));
+    };
+    if q.get("code_challenge_method").map(String::as_str) != Some("S256") {
+        return html(
+            StatusCode::BAD_REQUEST,
+            error_page("Поддерживается только code_challenge_method=S256."),
+        );
+    }
 
     // Require a logged-in owner session; otherwise bounce to login and come back.
-    if !app.read_session(req.headers()) {
+    let Some(session_cookie) = app.read_session_cookie(req.headers()) else {
         let mut next_path = req.uri().path().to_string();
         if !raw_query.is_empty() {
             next_path.push('?');
@@ -529,8 +648,9 @@ fn oauth_authorize(app: &App, req: Request) -> Response {
         }
         let login_url = format!("/login?{}", urlencode([("next", next_path.as_str())]));
         return redirect(StatusCode::FOUND, &login_url);
-    }
+    };
 
+    let csrf_token = app.mint_csrf(&session_cookie);
     html(
         StatusCode::OK,
         templates::oauth_authorize(&HashMap::from([
@@ -539,8 +659,9 @@ fn oauth_authorize(app: &App, req: Request) -> Response {
             ("redirect_uri", Some(redirect_uri)),
             ("redirect_domain", Some(netloc(redirect_uri))),
             ("state", q.get("state").map(String::as_str)),
-            ("code_challenge", q.get("code_challenge").map(String::as_str)),
-            ("code_challenge_method", q.get("code_challenge_method").map(String::as_str)),
+            ("code_challenge", Some(code_challenge)),
+            ("code_challenge_method", Some("S256")),
+            ("csrf_token", Some(csrf_token.as_str())),
         ])),
     )
 }
@@ -557,8 +678,14 @@ async fn oauth_approve(app: &App, req: Request) -> Response {
             .collect();
         return missing_fields("body", &missing);
     };
-    if !app.read_session(&parts.headers) {
+    let Some(session_cookie) = app.read_session_cookie(&parts.headers) else {
         return detail(StatusCode::UNAUTHORIZED, "Not authenticated");
+    };
+    let Some(csrf_token) = form_field(&form, "csrf_token") else {
+        return detail(StatusCode::FORBIDDEN, "Invalid or missing CSRF token");
+    };
+    if !app.verify_csrf(&session_cookie, &csrf_token) {
+        return detail(StatusCode::FORBIDDEN, "Invalid or missing CSRF token");
     }
     let cfg = &app.cfg;
     if *client_id != cfg.mcp_client_id {
@@ -567,14 +694,20 @@ async fn oauth_approve(app: &App, req: Request) -> Response {
     if !cfg.mcp_redirect_uris.contains(redirect_uri) {
         return detail(StatusCode::BAD_REQUEST, "redirect_uri not allowed");
     }
+    let Some(code_challenge) = form_field(&form, "code_challenge") else {
+        return detail(StatusCode::BAD_REQUEST, "S256 PKCE is required");
+    };
+    if form_field(&form, "code_challenge_method").as_deref() != Some("S256") {
+        return detail(StatusCode::BAD_REQUEST, "S256 PKCE is required");
+    }
 
     let code = format!("code_{}", app.token_urlsafe(32));
     app.store_code(
         code.clone(),
         CodeData {
             redirect_uri: redirect_uri.clone(),
-            code_challenge: form_field(&form, "code_challenge"),
-            code_challenge_method: form_field(&form, "code_challenge_method"),
+            code_challenge,
+            code_challenge_method: "S256".to_string(),
         },
     );
     let state = form_field(&form, "state");
@@ -603,14 +736,11 @@ fn truthy(v: Option<&Value>) -> bool {
 }
 
 fn pkce_ok(verifier: &str, challenge: &str, method: Option<&str>) -> bool {
-    match method {
-        None | Some("plain") => ct_eq(verifier.as_bytes(), challenge.as_bytes()),
-        Some("S256") => {
-            let calculated = URL_SAFE_NO_PAD.encode(digest::digest(&digest::SHA256, verifier.as_bytes()));
-            ct_eq(calculated.as_bytes(), challenge.trim_end_matches('=').as_bytes())
-        }
-        Some(_) => false,
+    if method != Some("S256") || !(43..=128).contains(&verifier.len()) {
+        return false;
     }
+    let calculated = URL_SAFE_NO_PAD.encode(digest::digest(&digest::SHA256, verifier.as_bytes()));
+    ct_eq(calculated.as_bytes(), challenge.trim_end_matches('=').as_bytes())
 }
 
 async fn oauth_token(app: &App, req: Request) -> Response {
@@ -687,15 +817,13 @@ async fn oauth_token(app: &App, req: Request) -> Response {
     if !redirect_uri.is_some_and(|r| cfg.mcp_redirect_uris.iter().any(|u| u == r) && r == code_data.redirect_uri) {
         return oauth_error("invalid_grant", "Redirect URI mismatch");
     }
-    if let Some(challenge) = code_data.code_challenge.as_deref() {
-        let verifier = field("code_verifier");
-        if !truthy(verifier) {
-            return oauth_error("invalid_grant", "Missing code_verifier");
-        }
-        let Some(verifier) = verifier.and_then(Value::as_str) else { return internal_error() };
-        if !pkce_ok(verifier, challenge, code_data.code_challenge_method.as_deref()) {
-            return oauth_error("invalid_grant", "PKCE verification failed");
-        }
+    let verifier = field("code_verifier");
+    if !truthy(verifier) {
+        return oauth_error("invalid_grant", "Missing code_verifier");
+    }
+    let Some(verifier) = verifier.and_then(Value::as_str) else { return internal_error() };
+    if !pkce_ok(verifier, &code_data.code_challenge, Some(&code_data.code_challenge_method)) {
+        return oauth_error("invalid_grant", "PKCE verification failed");
     }
 
     let access_token = app.token.dumps(&json!({"client_id": cfg.mcp_client_id, "type": "mcp_access_token"}));
@@ -732,9 +860,11 @@ mod tests {
         let challenge = URL_SAFE_NO_PAD.encode(digest::digest(&digest::SHA256, verifier.as_bytes()));
         assert!(pkce_ok(&verifier, &challenge, Some("S256")));
         assert!(pkce_ok(&verifier, &format!("{challenge}="), Some("S256")));
-        assert!(!pkce_ok("b", &challenge, Some("S256")));
-        assert!(pkce_ok("x", "x", None) && pkce_ok("x", "x", Some("plain")));
-        assert!(!pkce_ok("x", "x", Some("S512")));
+        assert!(!pkce_ok(&"b".repeat(43), &challenge, Some("S256")));
+        assert!(!pkce_ok("short", &challenge, Some("S256")));
+        assert!(!pkce_ok(&verifier, &verifier, None));
+        assert!(!pkce_ok(&verifier, &verifier, Some("plain")));
+        assert!(!pkce_ok(&verifier, &challenge, Some("S512")));
     }
 
     #[test]

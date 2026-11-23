@@ -12,6 +12,12 @@
    "additionalProperties": false
   },
   "name": "workout_count",
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -49,6 +55,12 @@
    "additionalProperties": false
   },
   "name": "list_workouts",
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -75,6 +87,12 @@
    "additionalProperties": false
   },
   "name": "get_workout",
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -112,6 +130,12 @@
    "additionalProperties": false
   },
   "name": "list_routines",
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -138,6 +162,12 @@
    "additionalProperties": false
   },
   "name": "get_routine",
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -167,6 +197,12 @@
    "additionalProperties": false
   },
   "name": "list_routine_folders",
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -193,6 +229,12 @@
    "additionalProperties": false
   },
   "name": "get_routine_folder",
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -212,6 +254,12 @@
    "additionalProperties": false
   },
   "name": "get_user_info",
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -242,6 +290,12 @@
    "additionalProperties": false
   },
   "name": "search_exercise_templates",
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "properties": {
     "result": {
@@ -280,6 +334,12 @@
    "additionalProperties": false
   },
   "name": "get_exercise_template",
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -332,6 +392,12 @@
    "additionalProperties": false
   },
   "name": "get_exercise_history",
+  "annotations": {
+   "readOnlyHint": true,
+   "destructiveHint": false,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -520,6 +586,12 @@
    "additionalProperties": false
   },
   "name": "create_routine",
+  "annotations": {
+   "readOnlyHint": false,
+   "destructiveHint": false,
+   "idempotentHint": false,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -532,7 +604,7 @@
     "tags": []
    }
   },
-  "description": "Replace an existing routine's contents (title, notes, full exercise list).\n\nThis overwrites the routine — fetch it with ``get_routine`` first if you only\nwant to tweak part of it, then send the complete desired state.",
+  "description": "Update an existing routine (title, notes, exercises).\n\nOmitted fields (including ``notes`` and ``exercises``) are preserved from the\ncurrent routine. To edit exercises, fetch with ``get_routine`` first and send\nthe complete desired ``exercises`` list.",
   "inputSchema": {
    "properties": {
     "routine_id": {
@@ -542,143 +614,150 @@
      "type": "string"
     },
     "exercises": {
-     "items": {
-      "description": "One exercise slot. ``exercise_template_id`` comes from\n``search_exercise_templates``. Group exercises into a superset by giving them\nthe same integer ``superset_id`` (null = not in a superset).",
-      "properties": {
-       "exercise_template_id": {
-        "type": "string"
-       },
-       "sets": {
-        "items": {
-         "description": "One set. Provide the fields relevant to the exercise type: weight_kg+reps\nfor lifts, duration_seconds for planks/cardio, distance_meters for runs.",
-         "properties": {
-          "type": {
-           "default": "normal",
-           "description": "warmup | normal | failure | dropset",
-           "enum": [
-            "warmup",
-            "normal",
-            "failure",
-            "dropset"
-           ],
-           "type": "string"
-          },
-          "weight_kg": {
-           "anyOf": [
-            {
-             "type": "number"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null,
-           "description": "Weight in kilograms"
-          },
-          "reps": {
-           "anyOf": [
-            {
-             "type": "integer"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null
-          },
-          "distance_meters": {
-           "anyOf": [
-            {
-             "type": "number"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null
-          },
-          "duration_seconds": {
-           "anyOf": [
-            {
-             "type": "integer"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null
-          },
-          "rpe": {
-           "anyOf": [
-            {
-             "type": "number"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null,
-           "description": "Rate of perceived exertion 6–10 (workouts only)"
-          },
-          "custom_metric": {
-           "anyOf": [
-            {
-             "type": "number"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null,
-           "description": "Optional metric value for exercises tracking specialized units"
-          }
-         },
-         "type": "object"
-        },
-        "type": "array"
-       },
-       "superset_id": {
-        "anyOf": [
-         {
-          "type": "integer"
-         },
-         {
-          "type": "null"
-         }
-        ],
-        "default": null
-       },
-       "rest_seconds": {
-        "anyOf": [
-         {
-          "type": "integer"
-         },
-         {
-          "type": "null"
-         }
-        ],
-        "default": null,
-        "description": "Rest after this exercise (routines)"
-       },
-       "notes": {
-        "anyOf": [
-         {
+     "anyOf": [
+      {
+       "items": {
+        "description": "One exercise slot. ``exercise_template_id`` comes from\n``search_exercise_templates``. Group exercises into a superset by giving them\nthe same integer ``superset_id`` (null = not in a superset).",
+        "properties": {
+         "exercise_template_id": {
           "type": "string"
          },
-         {
-          "type": "null"
+         "sets": {
+          "items": {
+           "description": "One set. Provide the fields relevant to the exercise type: weight_kg+reps\nfor lifts, duration_seconds for planks/cardio, distance_meters for runs.",
+           "properties": {
+            "type": {
+             "default": "normal",
+             "description": "warmup | normal | failure | dropset",
+             "enum": [
+              "warmup",
+              "normal",
+              "failure",
+              "dropset"
+             ],
+             "type": "string"
+            },
+            "weight_kg": {
+             "anyOf": [
+              {
+               "type": "number"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null,
+             "description": "Weight in kilograms"
+            },
+            "reps": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null
+            },
+            "distance_meters": {
+             "anyOf": [
+              {
+               "type": "number"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null
+            },
+            "duration_seconds": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null
+            },
+            "rpe": {
+             "anyOf": [
+              {
+               "type": "number"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null,
+             "description": "Rate of perceived exertion 6–10 (workouts only)"
+            },
+            "custom_metric": {
+             "anyOf": [
+              {
+               "type": "number"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null,
+             "description": "Optional metric value for exercises tracking specialized units"
+            }
+           },
+           "type": "object"
+          },
+          "type": "array"
+         },
+         "superset_id": {
+          "anyOf": [
+           {
+            "type": "integer"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "rest_seconds": {
+          "anyOf": [
+           {
+            "type": "integer"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null,
+          "description": "Rest after this exercise (routines)"
+         },
+         "notes": {
+          "anyOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
          }
+        },
+        "required": [
+         "exercise_template_id",
+         "sets"
         ],
-        "default": null
-       }
+        "type": "object"
+       },
+       "type": "array"
       },
-      "required": [
-       "exercise_template_id",
-       "sets"
-      ],
-      "type": "object"
-     },
-     "type": "array"
+      {
+       "type": "null"
+      }
+     ]
     },
     "notes": {
      "anyOf": [
@@ -693,13 +772,18 @@
    },
    "required": [
     "routine_id",
-    "title",
-    "exercises"
+    "title"
    ],
    "type": "object",
    "additionalProperties": false
   },
   "name": "update_routine",
+  "annotations": {
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -726,6 +810,12 @@
    "additionalProperties": false
   },
   "name": "create_routine_folder",
+  "annotations": {
+   "readOnlyHint": false,
+   "destructiveHint": false,
+   "idempotentHint": false,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -915,6 +1005,12 @@
    "additionalProperties": false
   },
   "name": "create_workout",
+  "annotations": {
+   "readOnlyHint": false,
+   "destructiveHint": false,
+   "idempotentHint": false,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -927,7 +1023,7 @@
     "tags": []
    }
   },
-  "description": "Overwrite an existing logged workout with the full desired state.\nFetch it with ``get_workout`` first if you only mean to edit part of it.",
+  "description": "Update an existing logged workout.\nOmitted fields (including ``description``, ``is_private``, and ``exercises``) are\npreserved from the current workout. Fetch with ``get_workout`` first if you mean\nto edit exercises.",
   "inputSchema": {
    "properties": {
     "workout_id": {
@@ -943,143 +1039,150 @@
      "type": "string"
     },
     "exercises": {
-     "items": {
-      "description": "One exercise slot. ``exercise_template_id`` comes from\n``search_exercise_templates``. Group exercises into a superset by giving them\nthe same integer ``superset_id`` (null = not in a superset).",
-      "properties": {
-       "exercise_template_id": {
-        "type": "string"
-       },
-       "sets": {
-        "items": {
-         "description": "One set. Provide the fields relevant to the exercise type: weight_kg+reps\nfor lifts, duration_seconds for planks/cardio, distance_meters for runs.",
-         "properties": {
-          "type": {
-           "default": "normal",
-           "description": "warmup | normal | failure | dropset",
-           "enum": [
-            "warmup",
-            "normal",
-            "failure",
-            "dropset"
-           ],
-           "type": "string"
-          },
-          "weight_kg": {
-           "anyOf": [
-            {
-             "type": "number"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null,
-           "description": "Weight in kilograms"
-          },
-          "reps": {
-           "anyOf": [
-            {
-             "type": "integer"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null
-          },
-          "distance_meters": {
-           "anyOf": [
-            {
-             "type": "number"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null
-          },
-          "duration_seconds": {
-           "anyOf": [
-            {
-             "type": "integer"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null
-          },
-          "rpe": {
-           "anyOf": [
-            {
-             "type": "number"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null,
-           "description": "Rate of perceived exertion 6–10 (workouts only)"
-          },
-          "custom_metric": {
-           "anyOf": [
-            {
-             "type": "number"
-            },
-            {
-             "type": "null"
-            }
-           ],
-           "default": null,
-           "description": "Optional metric value for exercises tracking specialized units"
-          }
-         },
-         "type": "object"
-        },
-        "type": "array"
-       },
-       "superset_id": {
-        "anyOf": [
-         {
-          "type": "integer"
-         },
-         {
-          "type": "null"
-         }
-        ],
-        "default": null
-       },
-       "rest_seconds": {
-        "anyOf": [
-         {
-          "type": "integer"
-         },
-         {
-          "type": "null"
-         }
-        ],
-        "default": null,
-        "description": "Rest after this exercise (routines)"
-       },
-       "notes": {
-        "anyOf": [
-         {
+     "anyOf": [
+      {
+       "items": {
+        "description": "One exercise slot. ``exercise_template_id`` comes from\n``search_exercise_templates``. Group exercises into a superset by giving them\nthe same integer ``superset_id`` (null = not in a superset).",
+        "properties": {
+         "exercise_template_id": {
           "type": "string"
          },
-         {
-          "type": "null"
+         "sets": {
+          "items": {
+           "description": "One set. Provide the fields relevant to the exercise type: weight_kg+reps\nfor lifts, duration_seconds for planks/cardio, distance_meters for runs.",
+           "properties": {
+            "type": {
+             "default": "normal",
+             "description": "warmup | normal | failure | dropset",
+             "enum": [
+              "warmup",
+              "normal",
+              "failure",
+              "dropset"
+             ],
+             "type": "string"
+            },
+            "weight_kg": {
+             "anyOf": [
+              {
+               "type": "number"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null,
+             "description": "Weight in kilograms"
+            },
+            "reps": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null
+            },
+            "distance_meters": {
+             "anyOf": [
+              {
+               "type": "number"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null
+            },
+            "duration_seconds": {
+             "anyOf": [
+              {
+               "type": "integer"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null
+            },
+            "rpe": {
+             "anyOf": [
+              {
+               "type": "number"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null,
+             "description": "Rate of perceived exertion 6–10 (workouts only)"
+            },
+            "custom_metric": {
+             "anyOf": [
+              {
+               "type": "number"
+              },
+              {
+               "type": "null"
+              }
+             ],
+             "default": null,
+             "description": "Optional metric value for exercises tracking specialized units"
+            }
+           },
+           "type": "object"
+          },
+          "type": "array"
+         },
+         "superset_id": {
+          "anyOf": [
+           {
+            "type": "integer"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
+         },
+         "rest_seconds": {
+          "anyOf": [
+           {
+            "type": "integer"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null,
+          "description": "Rest after this exercise (routines)"
+         },
+         "notes": {
+          "anyOf": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "null"
+           }
+          ],
+          "default": null
          }
+        },
+        "required": [
+         "exercise_template_id",
+         "sets"
         ],
-        "default": null
-       }
+        "type": "object"
+       },
+       "type": "array"
       },
-      "required": [
-       "exercise_template_id",
-       "sets"
-      ],
-      "type": "object"
-     },
-     "type": "array"
+      {
+       "type": "null"
+      }
+     ]
     },
     "description": {
      "anyOf": [
@@ -1099,13 +1202,18 @@
     "workout_id",
     "title",
     "start_time",
-    "end_time",
-    "exercises"
+    "end_time"
    ],
    "type": "object",
    "additionalProperties": false
   },
   "name": "update_workout",
+  "annotations": {
+   "readOnlyHint": false,
+   "destructiveHint": true,
+   "idempotentHint": true,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true
@@ -1199,6 +1307,12 @@
    "additionalProperties": false
   },
   "name": "create_exercise_template",
+  "annotations": {
+   "readOnlyHint": false,
+   "destructiveHint": false,
+   "idempotentHint": false,
+   "openWorldHint": false
+  },
   "outputSchema": {
    "type": "object",
    "additionalProperties": true

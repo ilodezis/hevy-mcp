@@ -25,6 +25,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::DateTime;
+use chrono_tz::Tz;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
@@ -45,18 +47,43 @@ use crate::{
 static TOOLS: LazyLock<Vec<Tool>> =
     LazyLock::new(|| serde_json::from_str(include_str!("tools.json")).expect("valid tools.json"));
 
+const SERVER_INSTRUCTIONS: &str = "\
+Hevy workout & routine connector. \
+Two-step flows: \
+(1) Building workouts or routines: call `search_exercise_templates` first to get each `exercise_template_id`, then `create_routine` or `create_workout`. \
+(2) Analysing exercise progress or PRs: call `search_exercise_templates` for the id, then `get_exercise_history` (prefer over paging `list_workouts`). \
+(3) Updating routines or workouts: omitting `exercises` preserves existing exercises; to modify exercises, fetch with `get_routine` or `get_workout` first.";
+
 fn server_info() -> Implementation {
     Implementation::new("Hevy", version::server_version())
+}
+
+struct TemplateCatalog {
+    templates: Vec<Value>,
+    types_by_id: HashMap<String, String>,
+}
+
+#[derive(Default)]
+struct McpCaches {
+    catalog: tokio::sync::Mutex<Option<(Instant, Arc<TemplateCatalog>)>>,
+    extra_types: tokio::sync::Mutex<HashMap<String, String>>,
+    ru_titles: tokio::sync::Mutex<Option<(Instant, HashMap<String, String>)>>,
 }
 
 #[derive(Clone)]
 pub struct HevyMcp {
     hevy: Arc<HevyClient>,
+    tz: Tz,
+    caches: Arc<McpCaches>,
 }
 
 impl HevyMcp {
-    pub fn new(hevy: Arc<HevyClient>) -> Self {
-        Self { hevy }
+    pub fn new(hevy: Arc<HevyClient>, tz: Tz) -> Self {
+        Self {
+            hevy,
+            tz,
+            caches: Arc::new(McpCaches::default()),
+        }
     }
 }
 
@@ -67,7 +94,8 @@ impl ServerHandler for HevyMcp {
                 .enable_tools()
                 .enable_tool_list_changed()
                 .build(),
-        );
+        )
+        .with_instructions(SERVER_INSTRUCTIONS);
         info.server_info = server_info();
         info
     }
@@ -154,10 +182,9 @@ impl Args {
     }
 }
 
-fn exercises(args: &Args, workout: bool) -> Value {
-    let exercises = args.0.get("exercises").and_then(Value::as_array).cloned().unwrap_or_default();
+fn normalize_exercises(items: &[Value], workout: bool) -> Value {
     Value::Array(
-        exercises
+        items
             .iter()
             .map(|e| {
                 let field = |k: &str| e.get(k).cloned().unwrap_or(Value::Null);
@@ -168,8 +195,14 @@ fn exercises(args: &Args, workout: bool) -> Value {
                         sets.iter()
                             .map(|s| {
                                 let f = |k: &str| s.get(k).cloned().unwrap_or(Value::Null);
+                                let set_type = s
+                                    .get("type")
+                                    .or_else(|| s.get("set_type"))
+                                    .filter(|v| !v.is_null())
+                                    .cloned()
+                                    .unwrap_or_else(|| json!("normal"));
                                 let mut set = json!({
-                                    "type": f("type"),
+                                    "type": set_type,
                                     "weight_kg": f("weight_kg"),
                                     "reps": f("reps"),
                                     "distance_meters": f("distance_meters"),
@@ -203,6 +236,11 @@ fn exercises(args: &Args, workout: bool) -> Value {
             })
             .collect(),
     )
+}
+
+fn exercises(args: &Args, workout: bool) -> Value {
+    let items = args.0.get("exercises").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+    normalize_exercises(items, workout)
 }
 
 impl HevyMcp {
@@ -272,7 +310,7 @@ impl HevyMcp {
             "get_workout" => {
                 let id = a.str("workout_id");
                 match hevy.get_workout(id).await {
-                    Ok(val) => dict(Ok(clean_workout(val))),
+                    Ok(val) => dict(Ok(self.clean_workout(val))),
                     Err(HevyError::Api { status: 404, .. }) => {
                         Outcome::Error(format!("workout {id} not found"))
                     }
@@ -308,7 +346,7 @@ impl HevyMcp {
             "get_routine" => {
                 let id = a.str("routine_id");
                 match hevy.get_routine(id).await {
-                    Ok(val) => dict(Ok(clean_workout(val))),
+                    Ok(val) => dict(Ok(self.clean_workout(val))),
                     Err(HevyError::Api { status: 404, .. }) => {
                         Outcome::Error(format!("routine {id} not found"))
                     }
@@ -318,12 +356,12 @@ impl HevyMcp {
             "list_routine_folders" => {
                 match hevy.get_routine_folders(a.int("page"), a.int("page_size")).await {
                     Ok(mut envelope) => {
-                        if let Some(map) = envelope.as_object_mut() {
-                            if map.contains_key("routines") && !map.contains_key("routine_folders") {
-                                if let Some(routines) = map.remove("routines") {
-                                    map.insert("routine_folders".to_string(), routines);
-                                }
-                            }
+                        if let Some(map) = envelope.as_object_mut()
+                            && map.contains_key("routines")
+                            && !map.contains_key("routine_folders")
+                            && let Some(routines) = map.remove("routines")
+                        {
+                            map.insert("routine_folders".to_string(), routines);
                         }
                         dict(Ok(envelope))
                     }
@@ -381,9 +419,13 @@ impl HevyMcp {
                             tmpl.get("id").and_then(Value::as_str),
                             tmpl.get("type").or_else(|| tmpl.get("exercise_type")).and_then(Value::as_str),
                         ) {
-                            EXERCISE_TYPES.lock().await.insert(id_str.to_string(), ty.to_string());
+                            self.caches
+                                .extra_types
+                                .lock()
+                                .await
+                                .insert(id_str.to_string(), ty.to_string());
                         }
-                        let title_ru = cached_title_ru(id).await;
+                        let title_ru = self.cached_title_ru(id).await;
                         if let Some(map) = val.as_object_mut() {
                             map.remove("thumbnail_url");
                             if let Some(ru) = &title_ru {
@@ -416,7 +458,7 @@ impl HevyMcp {
                                 .and_then(Value::as_str)
                                 .map(is_assisted_type)
                                 .unwrap_or(false);
-                        dict(Ok(format_exercise_history(id, val, summary, is_ass)))
+                        dict(Ok(self.format_exercise_history(id, val, summary, is_ass)))
                     }
                     Err(HevyError::Api { status: 404, .. }) => {
                         Outcome::Error(format!("exercise template {id} not found"))
@@ -442,23 +484,40 @@ impl HevyMcp {
                 dict(match guard {
                     Err(e) => Err(e),
                     Ok(()) => {
-                        let notes = match a.0.get("notes") {
-                            Some(v) => v.clone(),
-                            None => match hevy.get_routine(id).await {
+                        let need_notes = !a.0.contains_key("notes");
+                        let need_exercises = matches!(a.0.get("exercises"), None | Some(Value::Null));
+                        let (notes, routine_exercises) = if need_notes || need_exercises {
+                            match hevy.get_routine(id).await {
                                 Ok(current) => {
                                     let cur_r = current.get("routine").unwrap_or(&current);
-                                    cur_r.get("notes").cloned().unwrap_or(Value::Null)
+                                    let n = match a.0.get("notes") {
+                                        Some(v) => v.clone(),
+                                        None => cur_r.get("notes").cloned().unwrap_or(Value::Null),
+                                    };
+                                    let ex = if need_exercises {
+                                        let existing = cur_r
+                                            .get("exercises")
+                                            .and_then(Value::as_array)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or(&[]);
+                                        normalize_exercises(existing, false)
+                                    } else {
+                                        exercises(&a, false)
+                                    };
+                                    (n, ex)
                                 }
                                 Err(HevyError::Api { status: 404, .. }) => {
                                     return Outcome::Error(format!("routine {id} not found"));
                                 }
                                 Err(e) => return Outcome::Error(e.to_string()),
-                            },
+                            }
+                        } else {
+                            (a.get("notes"), exercises(&a, false))
                         };
                         let routine = json!({
                             "title": a.get("title"),
                             "notes": notes,
-                            "exercises": exercises(&a, false),
+                            "exercises": routine_exercises,
                         });
                         hevy.update_routine(id, routine).await
                     }
@@ -485,37 +544,49 @@ impl HevyMcp {
                 dict(match guard {
                     Err(e) => Err(e),
                     Ok(()) => {
-                        let (is_private, description) = if a.0.contains_key("is_private")
-                            && a.0.contains_key("description")
-                        {
-                            (a.get("is_private"), a.get("description"))
-                        } else {
-                            match hevy.get_workout(id).await {
-                                Ok(current) => {
-                                    let cur_w = current.get("workout").unwrap_or(&current);
-                                    let p = match a.0.get("is_private") {
-                                        Some(v) => v.clone(),
-                                        None => cur_w.get("is_private").cloned().unwrap_or(json!(false)),
-                                    };
-                                    let d = match a.0.get("description") {
-                                        Some(v) => v.clone(),
-                                        None => cur_w.get("description").cloned().unwrap_or(Value::Null),
-                                    };
-                                    (p, d)
+                        let need_private = !a.0.contains_key("is_private");
+                        let need_desc = !a.0.contains_key("description");
+                        let need_exercises = matches!(a.0.get("exercises"), None | Some(Value::Null));
+                        let (is_private, description, workout_exercises) =
+                            if need_private || need_desc || need_exercises {
+                                match hevy.get_workout(id).await {
+                                    Ok(current) => {
+                                        let cur_w = current.get("workout").unwrap_or(&current);
+                                        let p = match a.0.get("is_private") {
+                                            Some(v) => v.clone(),
+                                            None => cur_w.get("is_private").cloned().unwrap_or(json!(false)),
+                                        };
+                                        let d = match a.0.get("description") {
+                                            Some(v) => v.clone(),
+                                            None => cur_w.get("description").cloned().unwrap_or(Value::Null),
+                                        };
+                                        let ex = if need_exercises {
+                                            let existing = cur_w
+                                                .get("exercises")
+                                                .and_then(Value::as_array)
+                                                .map(Vec::as_slice)
+                                                .unwrap_or(&[]);
+                                            normalize_exercises(existing, true)
+                                        } else {
+                                            exercises(&a, true)
+                                        };
+                                        (p, d, ex)
+                                    }
+                                    Err(HevyError::Api { status: 404, .. }) => {
+                                        return Outcome::Error(format!("workout {id} not found"));
+                                    }
+                                    Err(e) => return Outcome::Error(e.to_string()),
                                 }
-                                Err(HevyError::Api { status: 404, .. }) => {
-                                    return Outcome::Error(format!("workout {id} not found"));
-                                }
-                                Err(e) => return Outcome::Error(e.to_string()),
-                            }
-                        };
+                            } else {
+                                (a.get("is_private"), a.get("description"), exercises(&a, true))
+                            };
                         let workout = json!({
                             "title": a.get("title"),
                             "description": description,
                             "start_time": a.get("start_time"),
                             "end_time": a.get("end_time"),
                             "is_private": is_private,
-                            "exercises": exercises(&a, true),
+                            "exercises": workout_exercises,
                         });
                         hevy.update_workout(id, workout).await
                     }
@@ -533,24 +604,30 @@ impl HevyMcp {
                     "muscle_group": a.get("muscle_group"),
                     "other_muscles": other,
                 });
-                dict(hevy.create_exercise_template(exercise).await)
+                let res = hevy.create_exercise_template(exercise).await;
+                if res.is_ok() {
+                    self.invalidate_catalog().await;
+                }
+                dict(res)
             }
             _ => Outcome::Dict(json!({"error": format!("Unexpected error: no handler for {name}")})),
         }
     }
 
-    /// Find exercise templates by title substring, case-insensitive, scanning up
-    /// to 10 pages × 100 templates (default library + custom ones). The library
-    /// is English; a Cyrillic query is matched against the Russian titles the
-    /// user's own workouts carry (see `ru_titles`).
-    async fn search_exercise_templates(&self, query: &str, limit: i64) -> HevyResult<Vec<Value>> {
-        let needle = fold(query.trim());
-        let ru = if has_cyrillic(&needle) {
-            self.ru_titles().await?
-        } else {
-            RU_TITLES.lock().await.as_ref().map(|(_, m)| m.clone()).unwrap_or_default()
-        };
-        let mut results: Vec<Value> = Vec::new();
+    async fn invalidate_catalog(&self) {
+        *self.caches.catalog.lock().await = None;
+    }
+
+    /// Cached exercise template catalog (pages 1..=10, 6-hour TTL).
+    async fn catalog(&self) -> HevyResult<Arc<TemplateCatalog>> {
+        let mut guard = self.caches.catalog.lock().await;
+        if let Some((built, cat)) = guard.as_ref()
+            && built.elapsed() < TEMPLATE_CATALOG_TTL
+        {
+            return Ok(cat.clone());
+        }
+        let mut templates = Vec::new();
+        let mut types_by_id = HashMap::new();
         for page in 1..=10 {
             let envelope = self.hevy.get_exercise_templates(page, 100).await?;
             let batch = envelope
@@ -559,36 +636,66 @@ impl HevyMcp {
                 .cloned()
                 .unwrap_or_default();
             for t in &batch {
-                let id = t.get("id").and_then(Value::as_str).unwrap_or_default();
-                let title = t.get("title").and_then(Value::as_str).unwrap_or_default();
-                let title_ru = ru.get(id);
-                let matches = fold(title).contains(&needle) || title_ru.is_some_and(|r| fold(r).contains(&needle));
-                if matches {
-                    let field = |k: &str| t.get(k).cloned().unwrap_or(Value::Null);
-                    let ty_val = field("type");
-                    if let (Some(id_str), Some(ty_str)) = (t.get("id").and_then(Value::as_str), ty_val.as_str()) {
-                        EXERCISE_TYPES.lock().await.insert(id_str.to_string(), ty_str.to_string());
-                    }
-                    let mut entry = json!({
-                        "id": field("id"),
-                        "title": title,
-                        "type": ty_val,
-                        "primary_muscle_group": field("primary_muscle_group"),
-                        "equipment": field("equipment"),
-                        "is_custom": field("is_custom"),
-                    });
-                    if let Some(ru) = title_ru {
-                        entry["title_ru"] = json!(ru);
-                    }
-                    results.push(entry);
-                    if results.len() as i64 >= limit {
-                        return Ok(results);
-                    }
+                if let (Some(id), Some(ty)) = (
+                    t.get("id").and_then(Value::as_str),
+                    t.get("type").or_else(|| t.get("exercise_type")).and_then(Value::as_str),
+                ) {
+                    types_by_id.insert(id.to_string(), ty.to_string());
                 }
             }
+            let batch_empty = batch.is_empty();
+            templates.extend(batch);
             let page_count = envelope.get("page_count").and_then(Value::as_i64).unwrap_or(page);
-            if page >= page_count || batch.is_empty() {
+            if page >= page_count || batch_empty {
                 break;
+            }
+        }
+        let cat = Arc::new(TemplateCatalog { templates, types_by_id });
+        *guard = Some((Instant::now(), cat.clone()));
+        Ok(cat)
+    }
+
+    /// Find exercise templates by title substring, case-insensitive, searching the
+    /// cached catalog (up to 10 pages × 100 templates). The library is English;
+    /// a Cyrillic query is matched against the Russian titles the user's own
+    /// workouts carry (see `ru_titles`).
+    async fn search_exercise_templates(&self, query: &str, limit: i64) -> HevyResult<Vec<Value>> {
+        let needle = fold(query.trim());
+        let ru = if has_cyrillic(&needle) {
+            self.ru_titles().await?
+        } else {
+            self.caches
+                .ru_titles
+                .lock()
+                .await
+                .as_ref()
+                .map(|(_, m)| m.clone())
+                .unwrap_or_default()
+        };
+        let catalog = self.catalog().await?;
+        let mut results: Vec<Value> = Vec::new();
+        for t in &catalog.templates {
+            let id = t.get("id").and_then(Value::as_str).unwrap_or_default();
+            let title = t.get("title").and_then(Value::as_str).unwrap_or_default();
+            let title_ru = ru.get(id);
+            let matches = fold(title).contains(&needle) || title_ru.is_some_and(|r| fold(r).contains(&needle));
+            if matches {
+                let field = |k: &str| t.get(k).cloned().unwrap_or(Value::Null);
+                let mut entry = json!({
+                    "id": field("id"),
+                    "title": title,
+                    "type": field("type"),
+                    "primary_muscle_group": field("primary_muscle_group"),
+                    "equipment": field("equipment"),
+                    "is_custom": field("is_custom"),
+                });
+                if let Some(ru) = title_ru {
+                    entry["title_ru"] = json!(ru);
+                }
+                results.push(entry);
+                if results.len() as i64 >= limit {
+                    break;
+                }
             }
         }
         Ok(results)
@@ -598,7 +705,7 @@ impl HevyMcp {
     /// workouts: the Hevy app logs exercises under the user's language while
     /// the template library stays English. Newest title wins.
     async fn ru_titles(&self) -> HevyResult<HashMap<String, String>> {
-        let mut cache = RU_TITLES.lock().await;
+        let mut cache = self.caches.ru_titles.lock().await;
         if let Some((built, map)) = cache.as_ref()
             && built.elapsed() < RU_TITLES_TTL
         {
@@ -630,15 +737,30 @@ impl HevyMcp {
         Ok(map)
     }
 
+    /// The Russian title already learnt for a template, without fetching anything.
+    async fn cached_title_ru(&self, id: &str) -> Option<String> {
+        self.caches
+            .ru_titles
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|(_, m)| m.get(id).cloned())
+    }
+
     async fn is_assisted(&self, template_id: &str) -> bool {
         if template_id.is_empty() {
             return false;
         }
         {
-            let cache = EXERCISE_TYPES.lock().await;
-            if let Some(t) = cache.get(template_id) {
+            let extra = self.caches.extra_types.lock().await;
+            if let Some(t) = extra.get(template_id) {
                 return is_assisted_type(t);
             }
+        }
+        if let Ok(cat) = self.catalog().await
+            && let Some(ty) = cat.types_by_id.get(template_id)
+        {
+            return is_assisted_type(ty);
         }
         if let Ok(resp) = self.hevy.get_exercise_template(template_id).await {
             let tmpl = resp.get("exercise_template").unwrap_or(&resp);
@@ -649,7 +771,11 @@ impl HevyMcp {
                 .unwrap_or_default()
                 .to_string();
             let assisted = is_assisted_type(&ty);
-            EXERCISE_TYPES.lock().await.insert(template_id.to_string(), ty);
+            self.caches
+                .extra_types
+                .lock()
+                .await
+                .insert(template_id.to_string(), ty);
             return assisted;
         }
         false
@@ -664,20 +790,10 @@ fn is_assisted_type(ty: &str) -> bool {
         || t.contains("assisted")
 }
 
-static EXERCISE_TYPES: LazyLock<tokio::sync::Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
-
-/// Process-wide: one server talks to one Hevy account.
-static RU_TITLES: LazyLock<tokio::sync::Mutex<Option<(Instant, HashMap<String, String>)>>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(None));
+const TEMPLATE_CATALOG_TTL: Duration = Duration::from_secs(6 * 3600);
 const RU_TITLES_TTL: Duration = Duration::from_secs(6 * 3600);
 /// 10 pages × 10 workouts: the last ~100 sessions cover every exercise in use.
 const RU_TITLES_PAGES: i64 = 10;
-
-/// The Russian title already learnt for a template, without fetching anything.
-async fn cached_title_ru(id: &str) -> Option<String> {
-    RU_TITLES.lock().await.as_ref().and_then(|(_, m)| m.get(id).cloned())
-}
 
 fn has_cyrillic(s: &str) -> bool {
     s.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))
@@ -714,118 +830,60 @@ fn normalize_iso_timestamp(ts: &str) -> String {
     } else {
         s.to_string()
     };
-    if let Some(dot_idx) = cleaned.find('.') {
-        if let Some(z_idx) = cleaned[dot_idx..].find('Z') {
-            let before = &cleaned[..dot_idx];
-            let after = &cleaned[dot_idx + z_idx..];
-            cleaned = format!("{before}{after}");
-        }
+    if let Some(dot_idx) = cleaned.find('.')
+        && let Some(z_idx) = cleaned[dot_idx..].find('Z')
+    {
+        let before = &cleaned[..dot_idx];
+        let after = &cleaned[dot_idx + z_idx..];
+        cleaned = format!("{before}{after}");
     }
     cleaned
 }
 
-fn to_local_moscow(utc_iso: &str) -> Option<String> {
-    if utc_iso.len() < 19 || !utc_iso.ends_with('Z') {
-        return None;
-    }
-    let date_part = &utc_iso[..10];
-    let time_part = &utc_iso[11..19];
-    let parts: Vec<&str> = date_part.split('-').collect();
-    let tparts: Vec<&str> = time_part.split(':').collect();
-    if parts.len() != 3 || tparts.len() != 3 {
-        return None;
-    }
-    let mut y: i32 = parts[0].parse().ok()?;
-    let mut m: i32 = parts[1].parse().ok()?;
-    let mut d: i32 = parts[2].parse().ok()?;
-    let mut hh: i32 = tparts[0].parse().ok()?;
-    let mm: i32 = tparts[1].parse().ok()?;
-    let ss: i32 = tparts[2].parse().ok()?;
-
-    hh += 3;
-    if hh >= 24 {
-        hh -= 24;
-        d += 1;
-        let days_in_month = match m {
-            2 => {
-                if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
-                    29
-                } else {
-                    28
-                }
-            }
-            4 | 6 | 9 | 11 => 30,
-            _ => 31,
-        };
-        if d > days_in_month {
-            d = 1;
-            m += 1;
-            if m > 12 {
-                m = 1;
-                y += 1;
-            }
-        }
-    }
-    Some(format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}+03:00"))
+fn to_local(utc_iso: &str, tz: Tz) -> Option<String> {
+    let dt = DateTime::parse_from_rfc3339(utc_iso.trim()).ok()?;
+    Some(dt.with_timezone(&tz).format("%Y-%m-%dT%H:%M:%S%:z").to_string())
 }
 
 fn calc_duration_min(s: &str, e: &str) -> Option<i64> {
-    if s.len() < 19 || e.len() < 19 {
-        return None;
-    }
-    let t1_parts: Vec<&str> = s[11..19].split(':').collect();
-    let t2_parts: Vec<&str> = e[11..19].split(':').collect();
-    if t1_parts.len() != 3 || t2_parts.len() != 3 {
-        return None;
-    }
-    let h1: i64 = t1_parts[0].parse().ok()?;
-    let m1: i64 = t1_parts[1].parse().ok()?;
-    let s1: i64 = t1_parts[2].parse().ok()?;
-    let h2: i64 = t2_parts[0].parse().ok()?;
-    let m2: i64 = t2_parts[1].parse().ok()?;
-    let s2: i64 = t2_parts[2].parse().ok()?;
-
-    let sec1 = h1 * 3600 + m1 * 60 + s1;
-    let sec2 = h2 * 3600 + m2 * 60 + s2;
-    if sec2 >= sec1 {
-        Some((sec2 - sec1) / 60)
-    } else {
-        Some(((sec2 + 86400) - sec1) / 60)
-    }
-}
-
-fn clean_workout(mut workout: Value) -> Value {
-    if let Some(map) = workout.as_object_mut() {
-        if let Some(w) = map.get_mut("workout") {
-            if let Some(w_map) = w.as_object_mut() {
-                if let Some(s) = w_map.get("start_time").and_then(Value::as_str) {
-                    let norm = normalize_iso_timestamp(s);
-                    if let Some(loc) = to_local_moscow(&norm) {
-                        w_map.insert("start_time_local".to_string(), json!(loc));
-                    }
-                    w_map.insert("start_time".to_string(), json!(norm));
-                }
-                if let Some(e) = w_map.get("end_time").and_then(Value::as_str) {
-                    w_map.insert("end_time".to_string(), json!(normalize_iso_timestamp(e)));
-                }
-            }
-        } else {
-            if let Some(s) = map.get("start_time").and_then(Value::as_str) {
-                let norm = normalize_iso_timestamp(s);
-                if let Some(loc) = to_local_moscow(&norm) {
-                    map.insert("start_time_local".to_string(), json!(loc));
-                }
-                map.insert("start_time".to_string(), json!(norm));
-            }
-            if let Some(e) = map.get("end_time").and_then(Value::as_str) {
-                map.insert("end_time".to_string(), json!(normalize_iso_timestamp(e)));
-            }
-        }
-    }
-    strip_nulls(workout)
+    let start = DateTime::parse_from_rfc3339(s.trim()).ok()?;
+    let end = DateTime::parse_from_rfc3339(e.trim()).ok()?;
+    let mins = end.signed_duration_since(start).num_minutes();
+    (mins >= 0).then_some(mins)
 }
 
 impl HevyMcp {
+    fn clean_workout(&self, mut workout: Value) -> Value {
+        if let Some(map) = workout.as_object_mut() {
+            if let Some(w) = map.get_mut("workout") {
+                if let Some(w_map) = w.as_object_mut() {
+                    if let Some(s) = w_map.get("start_time").and_then(Value::as_str) {
+                        let norm = normalize_iso_timestamp(s);
+                        if let Some(loc) = to_local(&norm, self.tz) {
+                            w_map.insert("start_time_local".to_string(), json!(loc));
+                        }
+                        w_map.insert("start_time".to_string(), json!(norm));
+                    }
+                    if let Some(e) = w_map.get("end_time").and_then(Value::as_str) {
+                        w_map.insert("end_time".to_string(), json!(normalize_iso_timestamp(e)));
+                    }
+                }
+            } else {
+                if let Some(s) = map.get("start_time").and_then(Value::as_str) {
+                    let norm = normalize_iso_timestamp(s);
+                    if let Some(loc) = to_local(&norm, self.tz) {
+                        map.insert("start_time_local".to_string(), json!(loc));
+                    }
+                    map.insert("start_time".to_string(), json!(norm));
+                }
+                if let Some(e) = map.get("end_time").and_then(Value::as_str) {
+                    map.insert("end_time".to_string(), json!(normalize_iso_timestamp(e)));
+                }
+            }
+        }
+        strip_nulls(workout)
+    }
+
     async fn format_workouts_list(&self, mut envelope: Value, detail: &str) -> Value {
         let Some(workouts) = envelope.get_mut("workouts").and_then(Value::as_array_mut) else {
             return strip_nulls(envelope);
@@ -835,7 +893,7 @@ impl HevyMcp {
                 if let Some(map) = w.as_object_mut() {
                     if let Some(s) = map.get("start_time").and_then(Value::as_str) {
                         let norm = normalize_iso_timestamp(s);
-                        if let Some(loc) = to_local_moscow(&norm) {
+                        if let Some(loc) = to_local(&norm, self.tz) {
                             map.insert("start_time_local".to_string(), json!(loc));
                         }
                         map.insert("start_time".to_string(), json!(norm));
@@ -865,13 +923,13 @@ impl HevyMcp {
                     .map(is_assisted_type)
                     .unwrap_or(false)
                     || self.is_assisted(t_id).await;
-                if !is_assisted {
-                    if let Some(sets) = e.get("sets").and_then(Value::as_array) {
-                        for s in sets {
-                            let wt = s.get("weight_kg").and_then(Value::as_f64).unwrap_or(0.0);
-                            let r = s.get("reps").and_then(Value::as_i64).unwrap_or(0);
-                            total_vol += wt * (r as f64);
-                        }
+                if !is_assisted
+                    && let Some(sets) = e.get("sets").and_then(Value::as_array)
+                {
+                    for s in sets {
+                        let wt = s.get("weight_kg").and_then(Value::as_f64).unwrap_or(0.0);
+                        let r = s.get("reps").and_then(Value::as_i64).unwrap_or(0);
+                        total_vol += wt * (r as f64);
                     }
                 }
             }
@@ -879,7 +937,7 @@ impl HevyMcp {
             let end_raw = w.get("end_time").and_then(Value::as_str).unwrap_or_default();
             let start_norm = normalize_iso_timestamp(start_raw);
             let end_norm = normalize_iso_timestamp(end_raw);
-            let start_loc = to_local_moscow(&start_norm);
+            let start_loc = to_local(&start_norm, self.tz);
             let duration = calc_duration_min(&start_norm, &end_norm);
 
             let mut sum_item = json!({
@@ -901,6 +959,111 @@ impl HevyMcp {
         }
         envelope["workouts"] = Value::Array(summary_workouts);
         strip_nulls(envelope)
+    }
+
+    fn format_exercise_history(&self, template_id: &str, val: Value, summary: bool, is_assisted: bool) -> Value {
+        let Some(history) = val.get("exercise_history").and_then(Value::as_array) else {
+            return strip_nulls(val);
+        };
+        let mut workouts_order: Vec<String> = Vec::new();
+        let mut workouts_map: Map<String, Value> = Map::new();
+
+        for item in history {
+            let Some(w_id) = item.get("workout_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if !workouts_map.contains_key(w_id) {
+                workouts_order.push(w_id.to_string());
+                let s_raw = item.get("workout_start_time").and_then(Value::as_str).unwrap_or_default();
+                let e_raw = item.get("workout_end_time").and_then(Value::as_str).unwrap_or_default();
+                let s_norm = normalize_iso_timestamp(s_raw);
+                let e_norm = normalize_iso_timestamp(e_raw);
+                let s_loc = to_local(&s_norm, self.tz);
+                let mut w_obj = json!({
+                    "workout_id": w_id,
+                    "title": item.get("workout_title").cloned().unwrap_or(Value::Null),
+                    "start_time": s_norm,
+                    "end_time": e_norm,
+                    "sets": [],
+                });
+                if let Some(loc) = s_loc {
+                    w_obj["start_time_local"] = json!(loc);
+                }
+                workouts_map.insert(w_id.to_string(), w_obj);
+            }
+            if let Some(w_entry) = workouts_map.get_mut(w_id)
+                && let Some(sets) = w_entry.get_mut("sets").and_then(Value::as_array_mut)
+            {
+                let mut set_obj = Map::new();
+                for &k in &["weight_kg", "reps", "set_type", "rpe", "duration_seconds", "distance_meters", "custom_metric"] {
+                    if let Some(v) = item.get(k)
+                        && !v.is_null()
+                    {
+                        set_obj.insert(k.to_string(), v.clone());
+                    }
+                }
+                set_obj.insert("set_index".to_string(), json!(sets.len() + 1));
+                sets.push(Value::Object(set_obj));
+            }
+        }
+
+        let mut workouts_list = Vec::with_capacity(workouts_order.len());
+        for w_id in workouts_order {
+            if let Some(mut w) = workouts_map.remove(&w_id) {
+                if summary {
+                    let empty_sets = Vec::new();
+                    let sets = w.get("sets").and_then(Value::as_array).unwrap_or(&empty_sets);
+                    let mut top_set: Option<Value> = None;
+                    let mut max_w = -1.0;
+                    let mut volume = 0.0;
+                    let mut best_e1rm = 0.0;
+                    let mut best_assisted: Option<(f64, i64)> = None;
+                    for s in sets {
+                        let wt = s.get("weight_kg").and_then(Value::as_f64).unwrap_or(0.0);
+                        let r = s.get("reps").and_then(Value::as_i64).unwrap_or(0);
+                        if is_assisted {
+                            let is_better = match best_assisted {
+                                None => true,
+                                Some((best_wt, best_r)) => wt < best_wt || (wt == best_wt && r > best_r),
+                            };
+                            if is_better {
+                                best_assisted = Some((wt, r));
+                                top_set = Some(json!({"weight_kg": wt, "reps": r}));
+                            }
+                        } else {
+                            volume += wt * (r as f64);
+                            let e1rm = if r <= 1 { wt } else { wt * (1.0 + (r as f64) / 30.0) };
+                            if wt > max_w {
+                                max_w = wt;
+                                top_set = Some(json!({"weight_kg": wt, "reps": r}));
+                            }
+                            if e1rm > best_e1rm {
+                                best_e1rm = e1rm;
+                            }
+                        }
+                    }
+                    w["top_set"] = top_set.unwrap_or(Value::Null);
+                    if !is_assisted {
+                        w["volume_kg"] = json!((volume * 100.0).round() / 100.0);
+                        w["estimated_1rm"] = json!((best_e1rm * 10.0).round() / 10.0);
+                    }
+                }
+                if is_assisted
+                    && let Some(map) = w.as_object_mut()
+                {
+                    map.remove("volume_kg");
+                    map.remove("estimated_1rm");
+                }
+                workouts_list.push(w);
+            }
+        }
+
+        strip_nulls(json!({
+            "common": {
+                "exercise_template_id": template_id,
+            },
+            "workouts": workouts_list,
+        }))
     }
 }
 
@@ -934,107 +1097,60 @@ fn format_routines_list(mut envelope: Value, detail: &str) -> Value {
     strip_nulls(envelope)
 }
 
-fn format_exercise_history(template_id: &str, val: Value, summary: bool, is_assisted: bool) -> Value {
-    let Some(history) = val.get("exercise_history").and_then(Value::as_array) else {
-        return strip_nulls(val);
-    };
-    let mut workouts_order: Vec<String> = Vec::new();
-    let mut workouts_map: Map<String, Value> = Map::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for item in history {
-        let Some(w_id) = item.get("workout_id").and_then(Value::as_str) else {
-            continue;
-        };
-        if !workouts_map.contains_key(w_id) {
-            workouts_order.push(w_id.to_string());
-            let s_raw = item.get("workout_start_time").and_then(Value::as_str).unwrap_or_default();
-            let e_raw = item.get("workout_end_time").and_then(Value::as_str).unwrap_or_default();
-            let s_norm = normalize_iso_timestamp(s_raw);
-            let e_norm = normalize_iso_timestamp(e_raw);
-            let s_loc = to_local_moscow(&s_norm);
-            let mut w_obj = json!({
-                "workout_id": w_id,
-                "title": item.get("workout_title").cloned().unwrap_or(Value::Null),
-                "start_time": s_norm,
-                "end_time": e_norm,
-                "sets": [],
-            });
-            if let Some(loc) = s_loc {
-                w_obj["start_time_local"] = json!(loc);
-            }
-            workouts_map.insert(w_id.to_string(), w_obj);
-        }
-        if let Some(w_entry) = workouts_map.get_mut(w_id) {
-            if let Some(sets) = w_entry.get_mut("sets").and_then(Value::as_array_mut) {
-                let mut set_obj = Map::new();
-                for &k in &["weight_kg", "reps", "set_type", "rpe", "duration_seconds", "distance_meters", "custom_metric"] {
-                    if let Some(v) = item.get(k) {
-                        if !v.is_null() {
-                            set_obj.insert(k.to_string(), v.clone());
-                        }
-                    }
-                }
-                set_obj.insert("set_index".to_string(), json!(sets.len() + 1));
-                sets.push(Value::Object(set_obj));
-            }
-        }
+    #[test]
+    fn to_local_uses_configured_timezone_and_dst() {
+        assert_eq!(
+            to_local("2026-08-04T13:33:10Z", Tz::UTC).as_deref(),
+            Some("2026-08-04T13:33:10+00:00")
+        );
+        // Europe/Chisinau: +03:00 in August (EEST), +02:00 in January (EET)
+        assert_eq!(
+            to_local("2026-08-04T13:33:10Z", chrono_tz::Europe::Chisinau).as_deref(),
+            Some("2026-08-04T16:33:10+03:00")
+        );
+        assert_eq!(
+            to_local("2026-01-15T13:33:10Z", chrono_tz::Europe::Chisinau).as_deref(),
+            Some("2026-01-15T15:33:10+02:00")
+        );
+        assert_eq!(to_local("not-a-timestamp", Tz::UTC), None);
     }
 
-    let mut workouts_list = Vec::with_capacity(workouts_order.len());
-    for w_id in workouts_order {
-        if let Some(mut w) = workouts_map.remove(&w_id) {
-            if summary {
-                let empty_sets = Vec::new();
-                let sets = w.get("sets").and_then(Value::as_array).unwrap_or(&empty_sets);
-                let mut top_set: Option<Value> = None;
-                let mut max_w = -1.0;
-                let mut volume = 0.0;
-                let mut best_e1rm = 0.0;
-                let mut best_assisted: Option<(f64, i64)> = None;
-                for s in sets {
-                    let wt = s.get("weight_kg").and_then(Value::as_f64).unwrap_or(0.0);
-                    let r = s.get("reps").and_then(Value::as_i64).unwrap_or(0);
-                    if is_assisted {
-                        let is_better = match best_assisted {
-                            None => true,
-                            Some((best_wt, best_r)) => wt < best_wt || (wt == best_wt && r > best_r),
-                        };
-                        if is_better {
-                            best_assisted = Some((wt, r));
-                            top_set = Some(json!({"weight_kg": wt, "reps": r}));
-                        }
-                    } else {
-                        volume += wt * (r as f64);
-                        let e1rm = if r <= 1 { wt } else { wt * (1.0 + (r as f64) / 30.0) };
-                        if wt > max_w {
-                            max_w = wt;
-                            top_set = Some(json!({"weight_kg": wt, "reps": r}));
-                        }
-                        if e1rm > best_e1rm {
-                            best_e1rm = e1rm;
-                        }
-                    }
-                }
-                w["top_set"] = top_set.unwrap_or(Value::Null);
-                if !is_assisted {
-                    w["volume_kg"] = json!((volume * 100.0).round() / 100.0);
-                    w["estimated_1rm"] = json!((best_e1rm * 10.0).round() / 10.0);
-                }
-            }
-            if is_assisted {
-                if let Some(map) = w.as_object_mut() {
-                    map.remove("volume_kg");
-                    map.remove("estimated_1rm");
-                }
-            }
-            workouts_list.push(w);
-        }
+    #[test]
+    fn calc_duration_min_parses_full_dates() {
+        assert_eq!(
+            calc_duration_min("2026-08-04T13:33:10Z", "2026-08-04T14:28:51Z"),
+            Some(55)
+        );
+        // Midnight crossing
+        assert_eq!(
+            calc_duration_min("2026-08-04T23:30:00Z", "2026-08-05T00:30:00Z"),
+            Some(60)
+        );
+        // Multi-day (> 24h) is not wrapped modulo 24h
+        assert_eq!(
+            calc_duration_min("2026-08-04T10:00:00Z", "2026-08-05T11:00:00Z"),
+            Some(25 * 60)
+        );
+        // End before start is rejected
+        assert_eq!(
+            calc_duration_min("2026-08-04T11:00:00Z", "2026-08-04T10:00:00Z"),
+            None
+        );
     }
 
-    strip_nulls(json!({
-        "common": {
-            "exercise_template_id": template_id,
-        },
-        "workouts": workouts_list,
-    }))
+    #[test]
+    fn all_tools_have_complete_annotations() {
+        assert_eq!(TOOLS.len(), 17);
+        for tool in TOOLS.iter() {
+            let ann = tool.annotations.as_ref().expect("annotations present");
+            assert!(ann.read_only_hint.is_some(), "{}", tool.name);
+            assert!(ann.destructive_hint.is_some(), "{}", tool.name);
+            assert!(ann.idempotent_hint.is_some(), "{}", tool.name);
+            assert!(ann.open_world_hint.is_some(), "{}", tool.name);
+        }
+    }
 }

@@ -23,6 +23,10 @@ use crate::urlenc::build_url;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = concat!("hevy-mcp/", env!("CARGO_PKG_VERSION"));
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const GET_MAX_ATTEMPTS: usize = 3;
+const RETRY_BASE_MS: u64 = 150;
+const MAX_RETRY_AFTER_SECS: u64 = 5;
 
 pub enum HevyError {
     /// A request was attempted without `HEVY_API_KEY`.
@@ -91,9 +95,36 @@ impl HevyClient {
             Some(value) => Bytes::from(encode_json(&value)?),
             None => Bytes::new(),
         };
+        let max_attempts = if method == Method::GET { GET_MAX_ATTEMPTS } else { 1 };
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let (status, retry_after, content) = self.request_once(&method, &url, &body).await?;
+            if is_retryable_status(status) && attempt < max_attempts {
+                tokio::time::sleep(retry_delay(attempt, retry_after)).await;
+                continue;
+            }
+            if status >= 400 {
+                let text = String::from_utf8_lossy(&content);
+                return Err(HevyError::Api { status, message: text.chars().take(400).collect() });
+            }
+            // 201/204 with an empty body → {} rather than choke on parsing.
+            if content.is_empty() {
+                return Ok(Value::Object(Map::new()));
+            }
+            return serde_json::from_slice(&content).map_err(|e| HevyError::Unexpected(e.to_string()));
+        }
+    }
+
+    async fn request_once(
+        &self,
+        method: &Method,
+        url: &str,
+        body: &Bytes,
+    ) -> HevyResult<(u16, Option<u64>, Vec<u8>)> {
         let mut req = Request::builder()
-            .method(method)
-            .uri(&url)
+            .method(method.clone())
+            .uri(url)
             .header("api-key", &self.api_key)
             .header(header::ACCEPT, "application/json")
             .header(header::CONTENT_TYPE, "application/json")
@@ -102,7 +133,7 @@ impl HevyClient {
             req = req.header(header::CONTENT_LENGTH, body.len());
         }
         let req = req
-            .body(Full::new(body))
+            .body(Full::new(body.clone()))
             .map_err(|e| HevyError::Unexpected(format!("Invalid URL {url:?}: {e}")))?;
 
         let resp = tokio::time::timeout(TIMEOUT, self.http.request(req))
@@ -110,6 +141,23 @@ impl HevyClient {
             .map_err(|_| HevyError::Unexpected("timed out waiting for Hevy".into()))?
             .map_err(|e| HevyError::Unexpected(error_chain(&e)))?;
         let status = resp.status().as_u16();
+        let retry_after = resp
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        if let Some(len) = resp
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            && len > MAX_RESPONSE_BYTES
+        {
+            return Err(HevyError::Unexpected(format!(
+                "Hevy response exceeded {MAX_RESPONSE_BYTES} byte limit"
+            )));
+        }
+
         let mut body = resp.into_body();
         let mut content = Vec::new();
         loop {
@@ -121,21 +169,17 @@ impl HevyClient {
                 Some(Err(e)) => return Err(HevyError::Unexpected(error_chain(&e))),
                 Some(Ok(frame)) => {
                     if let Some(data) = frame.data_ref() {
+                        if content.len().saturating_add(data.len()) > MAX_RESPONSE_BYTES {
+                            return Err(HevyError::Unexpected(format!(
+                                "Hevy response exceeded {MAX_RESPONSE_BYTES} byte limit"
+                            )));
+                        }
                         content.extend_from_slice(data);
                     }
                 }
             }
         }
-
-        if status >= 400 {
-            let text = String::from_utf8_lossy(&content);
-            return Err(HevyError::Api { status, message: text.chars().take(400).collect() });
-        }
-        // 201/204 with an empty body → {} rather than choke on parsing.
-        if content.is_empty() {
-            return Ok(Value::Object(Map::new()));
-        }
-        serde_json::from_slice(&content).map_err(|e| HevyError::Unexpected(e.to_string()))
+        Ok((status, retry_after, content))
     }
 
     async fn get(&self, path: &str, params: &[(&str, String)]) -> HevyResult {
@@ -282,6 +326,18 @@ fn py_int(value: &Value) -> HevyResult<Value> {
     }
 }
 
+fn is_retryable_status(status: u16) -> bool {
+    status == 429 || (500..=599).contains(&status)
+}
+
+fn retry_delay(attempt: usize, retry_after_secs: Option<u64>) -> Duration {
+    if let Some(secs) = retry_after_secs {
+        return Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS));
+    }
+    let shift = attempt.saturating_sub(1).min(6) as u32;
+    Duration::from_millis(RETRY_BASE_MS.saturating_mul(1u64 << shift))
+}
+
 fn error_chain(err: &dyn std::error::Error) -> String {
     let mut message = err.to_string();
     let mut source = err.source();
@@ -291,4 +347,24 @@ fn error_chain(err: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_policy_matches_transient_statuses() {
+        assert!(is_retryable_status(429));
+        assert!(is_retryable_status(500));
+        assert!(is_retryable_status(503));
+        assert!(!is_retryable_status(400));
+        assert!(!is_retryable_status(401));
+        assert!(!is_retryable_status(404));
+
+        assert_eq!(retry_delay(1, None), Duration::from_millis(150));
+        assert_eq!(retry_delay(2, None), Duration::from_millis(300));
+        assert_eq!(retry_delay(1, Some(2)), Duration::from_secs(2));
+        assert_eq!(retry_delay(1, Some(120)), Duration::from_secs(MAX_RETRY_AFTER_SECS));
+    }
 }
